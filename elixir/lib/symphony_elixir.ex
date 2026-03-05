@@ -24,20 +24,31 @@ defmodule SymphonyElixir.Application do
     :ok = SymphonyElixir.LogFile.configure()
     configure_endpoint()
 
-    children = [
-      {Phoenix.PubSub, name: SymphonyElixir.PubSub},
-      {Task.Supervisor, name: SymphonyElixir.TaskSupervisor},
-      SymphonyElixir.WorkflowStore,
-      SymphonyElixir.Orchestrator,
-      SymphonyElixirWeb.Endpoint,
-      SymphonyElixir.StatusDashboard
-    ]
+    children =
+      [
+        {Phoenix.PubSub, name: SymphonyElixir.PubSub},
+        {Task.Supervisor, name: SymphonyElixir.TaskSupervisor},
+        SymphonyElixir.WorkflowStore
+      ] ++
+        maybe_local_tracker() ++
+        [
+          SymphonyElixir.Orchestrator,
+          SymphonyElixirWeb.Endpoint,
+          SymphonyElixir.StatusDashboard
+        ]
 
     Supervisor.start_link(
       children,
       strategy: :one_for_one,
       name: SymphonyElixir.Supervisor
     )
+  end
+
+  defp maybe_local_tracker do
+    case SymphonyElixir.Config.tracker_kind() do
+      "local" -> [SymphonyElixir.Tracker.Local]
+      _ -> []
+    end
   end
 
   defp configure_endpoint do

@@ -32,6 +32,18 @@
       .stat-value { display: block; font-size: 16px; font-weight: 600; }
       .json-block { padding: 12px; border-radius: 8px; background: #fffdf8; border: 1px solid #d8cfbf; overflow: auto; font-size: 12px; white-space: pre-wrap; }
       .dashboard { max-width: 1200px; }
+      .create-form { padding: 14px; background: #fffdf8; border: 1px solid #d8cfbf; border-radius: 8px; margin-bottom: 16px; }
+      .form-row { margin-bottom: 10px; }
+      .form-row label, .form-field label { display: block; font-size: 11px; color: #8a8070; margin-bottom: 3px; }
+      .form-row input, .form-row textarea, .form-field input, .form-field select { font-family: inherit; font-size: 12px; padding: 5px 8px; border: 1px solid #d8cfbf; border-radius: 4px; background: #fff; width: 100%; }
+      .form-row textarea { resize: vertical; }
+      .form-row-inline { display: flex; gap: 12px; margin-bottom: 10px; }
+      .form-field { flex: 1; }
+      .submit-btn { font-family: inherit; font-size: 12px; padding: 6px 16px; background: #4a9; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
+      .submit-btn:hover { background: #3a8; }
+      .delete-btn { font-family: inherit; font-size: 11px; padding: 2px 8px; background: #fffdf8; border: 1px solid #c44; color: #c44; border-radius: 4px; cursor: pointer; }
+      .delete-btn:hover { background: #ffeedd; }
+      .empty-state { color: #8a8070; font-style: italic; padding: 12px 0; }
     </style>
     <script type="module">
       import {Socket} from "/assets/phoenix/phoenix.mjs"

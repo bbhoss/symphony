@@ -95,4 +95,92 @@
       <pre class="json-block">{Jason.encode!(@payload.rate_limits, pretty: true)}</pre>
     </section>
   <% end %>
+
+  <section :if={@local_tracker} class="section local-tracker">
+    <div class="header">
+      <h2>Local Issues</h2>
+      <button phx-click="toggle_create_form" class="refresh-btn">
+        {if @show_create_form, do: "Cancel", else: "New Issue"}
+      </button>
+    </div>
+
+    <div :if={@show_create_form} class="create-form">
+      <form phx-submit="create_issue">
+        <div class="form-row">
+          <label for="issue_title">Title</label>
+          <input type="text" name="issue[title]" id="issue_title" required placeholder="Issue title" />
+        </div>
+        <div class="form-row">
+          <label for="issue_description">Description</label>
+          <textarea name="issue[description]" id="issue_description" rows="3" placeholder="Optional description"></textarea>
+        </div>
+        <div class="form-row-inline">
+          <div class="form-field">
+            <label for="issue_state">State</label>
+            <select name="issue[state]" id="issue_state">
+              <option value="Todo">Todo</option>
+              <option value="In Progress">In Progress</option>
+              <option value="Done">Done</option>
+            </select>
+          </div>
+          <div class="form-field">
+            <label for="issue_priority">Priority</label>
+            <select name="issue[priority]" id="issue_priority">
+              <option value="">None</option>
+              <option value="1">1 - Urgent</option>
+              <option value="2">2 - High</option>
+              <option value="3">3 - Medium</option>
+              <option value="4">4 - Low</option>
+            </select>
+          </div>
+          <div class="form-field">
+            <label for="issue_labels">Labels</label>
+            <input type="text" name="issue[labels]" id="issue_labels" placeholder="bug, feature" />
+          </div>
+        </div>
+        <button type="submit" class="submit-btn">Create Issue</button>
+      </form>
+    </div>
+
+    <table :if={@local_issues != []}>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Title</th>
+          <th>State</th>
+          <th>Priority</th>
+          <th>Labels</th>
+          <th>Created</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr :for={issue <- @local_issues}>
+          <td class="mono">{issue.identifier}</td>
+          <td>{issue.title}</td>
+          <td>
+            <form phx-change="update_state" style="display:inline">
+              <input type="hidden" name="id" value={issue.id} />
+              <select name="state" onchange="this.form.dispatchEvent(new Event('change', {bubbles: true}))">
+                <option value="Todo" selected={issue.state == "Todo"}>Todo</option>
+                <option value="In Progress" selected={issue.state == "In Progress"}>In Progress</option>
+                <option value="Done" selected={issue.state == "Done"}>Done</option>
+                <option value="Closed" selected={issue.state == "Closed"}>Closed</option>
+              </select>
+            </form>
+          </td>
+          <td>{issue.priority || "-"}</td>
+          <td>{Enum.join(issue.labels, ", ")}</td>
+          <td>{if issue.created_at, do: Calendar.strftime(issue.created_at, "%Y-%m-%d %H:%M"), else: "-"}</td>
+          <td>
+            <button phx-click="delete_issue" phx-value-id={issue.id} class="delete-btn" data-confirm="Delete this issue?">
+              Delete
+            </button>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p :if={@local_issues == []} class="empty-state">No local issues yet. Click "New Issue" to create one.</p>
+  </section>
 </div>

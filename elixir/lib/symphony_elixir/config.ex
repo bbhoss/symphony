@@ -390,6 +390,7 @@ defmodule SymphonyElixir.Config do
     case tracker_kind() do
       "linear" -> :ok
       "memory" -> :ok
+      "local" -> :ok
       nil -> {:error, :missing_tracker_kind}
       other -> {:error, {:unsupported_tracker_kind, other}}
     end
