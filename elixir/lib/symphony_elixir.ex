@@ -41,21 +41,28 @@ defmodule SymphonyElixir.Application do
   end
 
   defp configure_endpoint do
-    port = SymphonyElixir.Config.server_port()
-    host = SymphonyElixir.Config.server_host()
+    case SymphonyElixir.Config.server_port() do
+      port when is_integer(port) and port > 0 ->
+        host = SymphonyElixir.Config.server_host() || "127.0.0.1"
 
-    if port do
-      ip = parse_ip(host || "127.0.0.1")
+        update_endpoint_config(
+          http: [ip: parse_ip(host), port: port],
+          url: [host: display_host(host), port: port, scheme: "http"],
+          server: true
+        )
 
-      existing = Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
-
-      Application.put_env(
-        :symphony_elixir,
-        SymphonyElixirWeb.Endpoint,
-        Keyword.merge(existing, http: [ip: ip, port: port], server: true)
-      )
+      _ ->
+        :ok
     end
   end
+
+  defp update_endpoint_config(overrides) do
+    existing = Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
+    Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, Keyword.merge(existing, overrides))
+  end
+
+  defp display_host(host) when host in ["0.0.0.0", "::", "[::]", ""], do: "127.0.0.1"
+  defp display_host(host), do: host
 
   defp parse_ip(host) when is_binary(host) do
     case :inet.parse_address(String.to_charlist(host)) do
