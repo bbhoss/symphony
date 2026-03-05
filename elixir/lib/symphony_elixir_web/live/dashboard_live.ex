@@ -13,7 +13,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     end
 
     payload = StateJSON.state_payload()
-    local? = Config.tracker_kind() == "local"
+    local? = Config.tracker_kind() == :local
     local_issues = if local?, do: Local.list_issues(), else: []
 
     {:ok,

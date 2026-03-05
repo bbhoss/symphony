@@ -46,7 +46,7 @@ defmodule SymphonyElixir.Application do
 
   defp maybe_local_tracker do
     case SymphonyElixir.Config.tracker_kind() do
-      "local" -> [SymphonyElixir.Tracker.Local]
+      :local -> [SymphonyElixir.Tracker.Local]
       _ -> []
     end
   end

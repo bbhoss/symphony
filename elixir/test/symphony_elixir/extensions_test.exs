@@ -167,7 +167,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
 
-    assert Config.tracker_kind() == "memory"
+    assert Config.tracker_kind() == :memory
     assert SymphonyElixir.Tracker.adapter() == Memory
     assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_candidate_issues()
     assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_issues_by_states([" in progress ", 42])
