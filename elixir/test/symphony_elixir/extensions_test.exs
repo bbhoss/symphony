@@ -569,6 +569,500 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert converted.operations == ["poll", "reconcile"]
   end
 
+  test "linear client fetches and normalizes issues via Req.Test" do
+    alias SymphonyElixir.Linear.Client
+
+    Req.Test.stub(Client, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      request = Jason.decode!(body)
+
+      assert request["query"] =~ "SymphonyLinearPoll"
+      assert request["variables"]["projectSlug"] == "project"
+      assert request["variables"]["stateNames"] == ["Todo", "In Progress"]
+
+      Req.Test.json(conn, %{
+        "data" => %{
+          "issues" => %{
+            "nodes" => [
+              %{
+                "id" => "issue-1",
+                "identifier" => "PROJ-1",
+                "title" => "Fix the bug",
+                "description" => "It's broken",
+                "priority" => 2,
+                "state" => %{"name" => "Todo"},
+                "branchName" => "fix-the-bug",
+                "url" => "https://linear.app/proj/issue/PROJ-1",
+                "assignee" => nil,
+                "labels" => %{"nodes" => [%{"name" => "Bug"}, %{"name" => "P1"}]},
+                "inverseRelations" => %{"nodes" => []},
+                "createdAt" => "2025-01-15T10:00:00Z",
+                "updatedAt" => "2025-01-15T12:00:00Z"
+              },
+              %{
+                "id" => "issue-2",
+                "identifier" => "PROJ-2",
+                "title" => "Add feature",
+                "description" => nil,
+                "priority" => nil,
+                "state" => %{"name" => "In Progress"},
+                "branchName" => nil,
+                "url" => "https://linear.app/proj/issue/PROJ-2",
+                "assignee" => %{"id" => "user-1"},
+                "labels" => %{"nodes" => []},
+                "inverseRelations" => %{"nodes" => []},
+                "createdAt" => "2025-01-16T10:00:00Z",
+                "updatedAt" => nil
+              }
+            ],
+            "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+          }
+        }
+      })
+    end)
+
+    assert {:ok, issues} = Client.fetch_candidate_issues()
+    assert length(issues) == 2
+
+    [issue1, issue2] = issues
+    assert %Issue{} = issue1
+    assert issue1.id == "issue-1"
+    assert issue1.identifier == "PROJ-1"
+    assert issue1.title == "Fix the bug"
+    assert issue1.description == "It's broken"
+    assert issue1.priority == 2
+    assert issue1.state == "Todo"
+    assert issue1.branch_name == "fix-the-bug"
+    assert issue1.url == "https://linear.app/proj/issue/PROJ-1"
+    assert issue1.assignee_id == nil
+    assert issue1.labels == ["bug", "p1"]
+    assert issue1.blocked_by == []
+    assert issue1.assigned_to_worker == true
+    assert %DateTime{} = issue1.created_at
+    assert %DateTime{} = issue1.updated_at
+
+    assert issue2.id == "issue-2"
+    assert issue2.priority == nil
+    assert issue2.branch_name == nil
+    assert issue2.description == nil
+    assert issue2.assignee_id == "user-1"
+    assert issue2.labels == []
+    assert issue2.updated_at == nil
+  end
+
+  test "linear client handles pagination across multiple pages via Req.Test" do
+    alias SymphonyElixir.Linear.Client
+
+    page = :counters.new(1, [])
+
+    Req.Test.stub(Client, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      request = Jason.decode!(body)
+      current_page = :counters.get(page, 1)
+      :counters.add(page, 1, 1)
+
+      case current_page do
+        1 ->
+          assert request["variables"]["after"] == nil
+
+          Req.Test.json(conn, %{
+            "data" => %{
+              "issues" => %{
+                "nodes" => [
+                  %{
+                    "id" => "page1-issue",
+                    "identifier" => "PROJ-1",
+                    "title" => "Page 1",
+                    "description" => nil,
+                    "priority" => 1,
+                    "state" => %{"name" => "Todo"},
+                    "branchName" => nil,
+                    "url" => nil,
+                    "assignee" => nil,
+                    "labels" => %{"nodes" => []},
+                    "inverseRelations" => %{"nodes" => []},
+                    "createdAt" => nil,
+                    "updatedAt" => nil
+                  }
+                ],
+                "pageInfo" => %{"hasNextPage" => true, "endCursor" => "cursor-1"}
+              }
+            }
+          })
+
+        2 ->
+          assert request["variables"]["after"] == "cursor-1"
+
+          Req.Test.json(conn, %{
+            "data" => %{
+              "issues" => %{
+                "nodes" => [
+                  %{
+                    "id" => "page2-issue",
+                    "identifier" => "PROJ-2",
+                    "title" => "Page 2",
+                    "description" => nil,
+                    "priority" => 1,
+                    "state" => %{"name" => "Todo"},
+                    "branchName" => nil,
+                    "url" => nil,
+                    "assignee" => nil,
+                    "labels" => %{"nodes" => []},
+                    "inverseRelations" => %{"nodes" => []},
+                    "createdAt" => nil,
+                    "updatedAt" => nil
+                  }
+                ],
+                "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+              }
+            }
+          })
+      end
+    end)
+
+    assert {:ok, issues} = Client.fetch_candidate_issues()
+    assert length(issues) == 2
+    assert Enum.map(issues, & &1.id) == ["page1-issue", "page2-issue"]
+  end
+
+  test "linear client handles GraphQL errors and non-200 responses via Req.Test" do
+    alias SymphonyElixir.Linear.Client
+
+    # GraphQL error in response body
+    Req.Test.stub(Client, fn conn ->
+      Req.Test.json(conn, %{
+        "errors" => [%{"message" => "Rate limited", "extensions" => %{"code" => "RATE_LIMITED"}}]
+      })
+    end)
+
+    assert {:error, {:linear_graphql_errors, [%{"message" => "Rate limited"} | _]}} =
+             Client.fetch_candidate_issues()
+
+    # Non-200 HTTP status
+    Req.Test.stub(Client, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(500, Jason.encode!(%{"error" => "Internal Server Error"}))
+    end)
+
+    assert {:error, {:linear_api_status, 500}} = Client.fetch_candidate_issues()
+
+    # Unknown/malformed response body
+    Req.Test.stub(Client, fn conn ->
+      Req.Test.json(conn, %{"unexpected" => "shape"})
+    end)
+
+    assert {:error, :linear_unknown_payload} = Client.fetch_candidate_issues()
+  end
+
+  test "linear client fetch_issues_by_states via Req.Test" do
+    alias SymphonyElixir.Linear.Client
+
+    Req.Test.stub(Client, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      request = Jason.decode!(body)
+      assert request["variables"]["stateNames"] == ["Done", "Closed"]
+
+      Req.Test.json(conn, %{
+        "data" => %{
+          "issues" => %{
+            "nodes" => [
+              %{
+                "id" => "done-1",
+                "identifier" => "PROJ-10",
+                "title" => "Done issue",
+                "description" => nil,
+                "priority" => nil,
+                "state" => %{"name" => "Done"},
+                "branchName" => nil,
+                "url" => nil,
+                "assignee" => nil,
+                "labels" => %{"nodes" => []},
+                "inverseRelations" => %{"nodes" => []},
+                "createdAt" => nil,
+                "updatedAt" => nil
+              }
+            ],
+            "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+          }
+        }
+      })
+    end)
+
+    assert {:ok, [issue]} = Client.fetch_issues_by_states(["Done", "Closed"])
+    assert issue.id == "done-1"
+    assert issue.state == "Done"
+
+    # Empty state list returns empty without making a request
+    assert {:ok, []} = Client.fetch_issues_by_states([])
+  end
+
+  test "linear client fetch_issue_states_by_ids via Req.Test" do
+    alias SymphonyElixir.Linear.Client
+
+    Req.Test.stub(Client, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      request = Jason.decode!(body)
+      assert request["query"] =~ "SymphonyLinearIssuesById"
+      assert request["variables"]["ids"] == ["id-1", "id-2"]
+
+      Req.Test.json(conn, %{
+        "data" => %{
+          "issues" => %{
+            "nodes" => [
+              %{
+                "id" => "id-1",
+                "identifier" => "PROJ-1",
+                "title" => "Issue 1",
+                "description" => nil,
+                "priority" => nil,
+                "state" => %{"name" => "In Progress"},
+                "branchName" => nil,
+                "url" => nil,
+                "assignee" => nil,
+                "labels" => %{"nodes" => []},
+                "inverseRelations" => %{"nodes" => []},
+                "createdAt" => nil,
+                "updatedAt" => nil
+              },
+              %{
+                "id" => "id-2",
+                "identifier" => "PROJ-2",
+                "title" => "Issue 2",
+                "description" => nil,
+                "priority" => nil,
+                "state" => %{"name" => "Done"},
+                "branchName" => nil,
+                "url" => nil,
+                "assignee" => nil,
+                "labels" => %{"nodes" => []},
+                "inverseRelations" => %{"nodes" => []},
+                "createdAt" => nil,
+                "updatedAt" => nil
+              }
+            ]
+          }
+        }
+      })
+    end)
+
+    assert {:ok, issues} = Client.fetch_issue_states_by_ids(["id-1", "id-2"])
+    assert length(issues) == 2
+    assert Enum.map(issues, & &1.state) == ["In Progress", "Done"]
+
+    # Empty ID list returns empty without making a request
+    assert {:ok, []} = Client.fetch_issue_states_by_ids([])
+  end
+
+  test "linear client normalizes blockers from inverse relations via Req.Test" do
+    alias SymphonyElixir.Linear.Client
+
+    Req.Test.stub(Client, fn conn ->
+      Req.Test.json(conn, %{
+        "data" => %{
+          "issues" => %{
+            "nodes" => [
+              %{
+                "id" => "blocked-issue",
+                "identifier" => "PROJ-5",
+                "title" => "Blocked",
+                "description" => nil,
+                "priority" => nil,
+                "state" => %{"name" => "Todo"},
+                "branchName" => nil,
+                "url" => nil,
+                "assignee" => nil,
+                "labels" => %{"nodes" => []},
+                "inverseRelations" => %{
+                  "nodes" => [
+                    %{
+                      "type" => "blocks",
+                      "issue" => %{
+                        "id" => "blocker-1",
+                        "identifier" => "PROJ-3",
+                        "state" => %{"name" => "In Progress"}
+                      }
+                    },
+                    %{
+                      "type" => "relates_to",
+                      "issue" => %{
+                        "id" => "related-1",
+                        "identifier" => "PROJ-4",
+                        "state" => %{"name" => "Done"}
+                      }
+                    },
+                    %{
+                      "type" => "Blocks",
+                      "issue" => %{
+                        "id" => "blocker-2",
+                        "identifier" => "PROJ-6",
+                        "state" => %{"name" => "Todo"}
+                      }
+                    }
+                  ]
+                },
+                "createdAt" => nil,
+                "updatedAt" => nil
+              }
+            ],
+            "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+          }
+        }
+      })
+    end)
+
+    assert {:ok, [issue]} = Client.fetch_candidate_issues()
+    assert length(issue.blocked_by) == 2
+    assert Enum.map(issue.blocked_by, & &1.identifier) == ["PROJ-3", "PROJ-6"]
+  end
+
+  test "linear client graphql/3 sends operation name and validates auth via Req.Test" do
+    alias SymphonyElixir.Linear.Client
+
+    Req.Test.stub(Client, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      request = Jason.decode!(body)
+
+      assert request["operationName"] == "MyOp"
+      assert request["query"] == "query { viewer { id } }"
+      assert request["variables"] == %{"key" => "value"}
+
+      # Verify auth header was sent
+      assert Plug.Conn.get_req_header(conn, "authorization") == ["token"]
+
+      Req.Test.json(conn, %{"data" => %{"viewer" => %{"id" => "user-123"}}})
+    end)
+
+    assert {:ok, %{"data" => %{"viewer" => %{"id" => "user-123"}}}} =
+             Client.graphql("query { viewer { id } }", %{"key" => "value"}, operation_name: "MyOp")
+  end
+
+  test "linear client resolves 'me' assignee via viewer query and filters via Req.Test" do
+    alias SymphonyElixir.Linear.Client
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_assignee: "me")
+    call_count = :counters.new(1, [])
+
+    Req.Test.stub(Client, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      request = Jason.decode!(body)
+      n = :counters.add(call_count, 1, 1) || :counters.get(call_count, 1)
+
+      if request["query"] =~ "SymphonyLinearViewer" do
+        Req.Test.json(conn, %{"data" => %{"viewer" => %{"id" => "viewer-id-123"}}})
+      else
+        Req.Test.json(conn, %{
+          "data" => %{
+            "issues" => %{
+              "nodes" => [
+                %{
+                  "id" => "my-issue",
+                  "identifier" => "PROJ-ME",
+                  "title" => "My issue",
+                  "description" => nil,
+                  "priority" => nil,
+                  "state" => %{"name" => "Todo"},
+                  "branchName" => nil,
+                  "url" => nil,
+                  "assignee" => %{"id" => "viewer-id-123"},
+                  "labels" => %{"nodes" => []},
+                  "inverseRelations" => %{"nodes" => []},
+                  "createdAt" => nil,
+                  "updatedAt" => nil
+                },
+                %{
+                  "id" => "other-issue",
+                  "identifier" => "PROJ-OTHER",
+                  "title" => "Not mine",
+                  "description" => nil,
+                  "priority" => nil,
+                  "state" => %{"name" => "Todo"},
+                  "branchName" => nil,
+                  "url" => nil,
+                  "assignee" => %{"id" => "someone-else"},
+                  "labels" => %{"nodes" => []},
+                  "inverseRelations" => %{"nodes" => []},
+                  "createdAt" => nil,
+                  "updatedAt" => nil
+                }
+              ],
+              "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+            }
+          }
+        })
+      end
+    end)
+
+    assert {:ok, issues} = Client.fetch_candidate_issues()
+    assert length(issues) == 2
+    my_issue = Enum.find(issues, &(&1.identifier == "PROJ-ME"))
+    other_issue = Enum.find(issues, &(&1.identifier == "PROJ-OTHER"))
+    assert my_issue.assigned_to_worker == true
+    assert other_issue.assigned_to_worker == false
+  end
+
+  test "linear client returns error when api token is missing" do
+    alias SymphonyElixir.Linear.Client
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: "")
+    assert {:error, :missing_linear_api_token} = Client.fetch_candidate_issues()
+  end
+
+  test "linear client assignee filtering via Req.Test" do
+    alias SymphonyElixir.Linear.Client
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_assignee: "user-assigned")
+
+    Req.Test.stub(Client, fn conn ->
+      Req.Test.json(conn, %{
+        "data" => %{
+          "issues" => %{
+            "nodes" => [
+              %{
+                "id" => "assigned-issue",
+                "identifier" => "PROJ-A",
+                "title" => "Assigned",
+                "description" => nil,
+                "priority" => nil,
+                "state" => %{"name" => "Todo"},
+                "branchName" => nil,
+                "url" => nil,
+                "assignee" => %{"id" => "user-assigned"},
+                "labels" => %{"nodes" => []},
+                "inverseRelations" => %{"nodes" => []},
+                "createdAt" => nil,
+                "updatedAt" => nil
+              },
+              %{
+                "id" => "unassigned-issue",
+                "identifier" => "PROJ-B",
+                "title" => "Not mine",
+                "description" => nil,
+                "priority" => nil,
+                "state" => %{"name" => "Todo"},
+                "branchName" => nil,
+                "url" => nil,
+                "assignee" => %{"id" => "other-user"},
+                "labels" => %{"nodes" => []},
+                "inverseRelations" => %{"nodes" => []},
+                "createdAt" => nil,
+                "updatedAt" => nil
+              }
+            ],
+            "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+          }
+        }
+      })
+    end)
+
+    assert {:ok, issues} = Client.fetch_candidate_issues()
+    assert length(issues) == 2
+    assigned = Enum.find(issues, &(&1.identifier == "PROJ-A"))
+    unassigned = Enum.find(issues, &(&1.identifier == "PROJ-B"))
+    assert assigned.assigned_to_worker == true
+    assert unassigned.assigned_to_worker == false
+  end
+
   defp assert_eventually(fun, attempts \\ 20)
 
   defp assert_eventually(fun, attempts) when attempts > 0 do
