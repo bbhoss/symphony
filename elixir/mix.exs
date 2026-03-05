@@ -23,7 +23,15 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.Codex.DynamicTool,
           SymphonyElixir.StatusDashboard,
           SymphonyElixir.LogFile,
-          SymphonyElixir.Workspace
+          SymphonyElixir.Workspace,
+          SymphonyElixirWeb,
+          SymphonyElixirWeb.Endpoint,
+          SymphonyElixirWeb.Router,
+          SymphonyElixirWeb.Layouts,
+          SymphonyElixirWeb.StateController,
+          SymphonyElixirWeb.StateJSON,
+          SymphonyElixirWeb.ErrorJSON,
+          SymphonyElixirWeb.DashboardLive
         ]
       ],
       test_ignore_filters: [
@@ -43,13 +51,19 @@ defmodule SymphonyElixir.MixProject do
   def application do
     [
       mod: {SymphonyElixir.Application, []},
-      extra_applications: [:logger]
+      extra_applications: [:logger, :runtime_tools]
     ]
   end
 
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
+      {:phoenix, "~> 1.8"},
+      {:phoenix_html, "~> 4.2"},
+      {:phoenix_live_view, "~> 1.1"},
+      {:phoenix_live_dashboard, "~> 0.8"},
+      {:bandit, "~> 1.10"},
+      {:phoenix_pubsub, "~> 2.1"},
       {:req, "~> 0.5"},
       {:jason, "~> 1.4"},
       {:yaml_elixir, "~> 2.12"},

@@ -1,0 +1,186 @@
+<div class="dashboard">
+  <div class="header">
+    <h1>Symphony Dashboard</h1>
+    <button phx-click="refresh" class="refresh-btn">Refresh</button>
+  </div>
+
+  <div class="generated-at">
+    Generated at: {@payload.generated_at}
+  </div>
+
+  <%= if Map.has_key?(@payload, :error) do %>
+    <div class="error-banner">
+      {@payload.error.code}: {@payload.error.message}
+    </div>
+  <% else %>
+    <div class="counts">
+      <span class="count running">Running: {@payload.counts.running}</span>
+      <span class="count retrying">Retrying: {@payload.counts.retrying}</span>
+    </div>
+
+    <section :if={@payload.running != []} class="section">
+      <h2>Running Agents</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Issue</th>
+            <th>State</th>
+            <th>Session</th>
+            <th>Turns</th>
+            <th>Tokens</th>
+            <th>Started</th>
+            <th>Last Event</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr :for={agent <- @payload.running}>
+            <td class="mono">{agent.issue_identifier}</td>
+            <td>{agent.state}</td>
+            <td class="mono">{truncate_session(agent.session_id)}</td>
+            <td>{agent.turn_count}</td>
+            <td>{format_number(agent.tokens.total_tokens)}</td>
+            <td>{agent.started_at}</td>
+            <td>{agent.last_event}</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section :if={@payload.retrying != []} class="section">
+      <h2>Retrying Agents</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Issue</th>
+            <th>Attempt</th>
+            <th>Due At</th>
+            <th>Error</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr :for={agent <- @payload.retrying}>
+            <td class="mono">{agent.issue_identifier}</td>
+            <td>{agent.attempt}</td>
+            <td>{agent.due_at}</td>
+            <td class="error-text">{inspect(agent.error)}</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section :if={@payload.codex_totals} class="section">
+      <h2>Codex Totals</h2>
+      <div class="stats-grid">
+        <div class="stat">
+          <span class="stat-label">Input Tokens</span>
+          <span class="stat-value">{format_number(@payload.codex_totals[:input_tokens] || @payload.codex_totals["input_tokens"] || 0)}</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Output Tokens</span>
+          <span class="stat-value">{format_number(@payload.codex_totals[:output_tokens] || @payload.codex_totals["output_tokens"] || 0)}</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Total Tokens</span>
+          <span class="stat-value">{format_number(@payload.codex_totals[:total_tokens] || @payload.codex_totals["total_tokens"] || 0)}</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Seconds Running</span>
+          <span class="stat-value">{@payload.codex_totals[:seconds_running] || @payload.codex_totals["seconds_running"] || 0}</span>
+        </div>
+      </div>
+    </section>
+
+    <section :if={@payload.rate_limits && @payload.rate_limits != %{}} class="section">
+      <h2>Rate Limits</h2>
+      <pre class="json-block">{Jason.encode!(@payload.rate_limits, pretty: true)}</pre>
+    </section>
+  <% end %>
+
+  <section :if={@local_tracker} class="section local-tracker">
+    <div class="header">
+      <h2>Local Issues</h2>
+      <button phx-click="toggle_create_form" class="refresh-btn">
+        {if @show_create_form, do: "Cancel", else: "New Issue"}
+      </button>
+    </div>
+
+    <div :if={@show_create_form} class="create-form">
+      <form phx-submit="create_issue">
+        <div class="form-row">
+          <label for="issue_title">Title</label>
+          <input type="text" name="issue[title]" id="issue_title" required placeholder="Issue title" />
+        </div>
+        <div class="form-row">
+          <label for="issue_description">Description</label>
+          <textarea name="issue[description]" id="issue_description" rows="3" placeholder="Optional description"></textarea>
+        </div>
+        <div class="form-row-inline">
+          <div class="form-field">
+            <label for="issue_state">State</label>
+            <select name="issue[state]" id="issue_state">
+              <option value="Todo">Todo</option>
+              <option value="In Progress">In Progress</option>
+              <option value="Done">Done</option>
+            </select>
+          </div>
+          <div class="form-field">
+            <label for="issue_priority">Priority</label>
+            <select name="issue[priority]" id="issue_priority">
+              <option value="">None</option>
+              <option value="1">1 - Urgent</option>
+              <option value="2">2 - High</option>
+              <option value="3">3 - Medium</option>
+              <option value="4">4 - Low</option>
+            </select>
+          </div>
+          <div class="form-field">
+            <label for="issue_labels">Labels</label>
+            <input type="text" name="issue[labels]" id="issue_labels" placeholder="bug, feature" />
+          </div>
+        </div>
+        <button type="submit" class="submit-btn">Create Issue</button>
+      </form>
+    </div>
+
+    <table :if={@local_issues != []}>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Title</th>
+          <th>State</th>
+          <th>Priority</th>
+          <th>Labels</th>
+          <th>Created</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr :for={issue <- @local_issues}>
+          <td class="mono">{issue.identifier}</td>
+          <td>{issue.title}</td>
+          <td>
+            <form phx-change="update_state" style="display:inline">
+              <input type="hidden" name="id" value={issue.id} />
+              <select name="state" onchange="this.form.dispatchEvent(new Event('change', {bubbles: true}))">
+                <option value="Todo" selected={issue.state == "Todo"}>Todo</option>
+                <option value="In Progress" selected={issue.state == "In Progress"}>In Progress</option>
+                <option value="Done" selected={issue.state == "Done"}>Done</option>
+                <option value="Closed" selected={issue.state == "Closed"}>Closed</option>
+              </select>
+            </form>
+          </td>
+          <td>{issue.priority || "-"}</td>
+          <td>{Enum.join(issue.labels, ", ")}</td>
+          <td>{if issue.created_at, do: Calendar.strftime(issue.created_at, "%Y-%m-%d %H:%M"), else: "-"}</td>
+          <td>
+            <button phx-click="delete_issue" phx-value-id={issue.id} class="delete-btn" data-confirm="Delete this issue?">
+              Delete
+            </button>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p :if={@local_issues == []} class="empty-state">No local issues yet. Click "New Issue" to create one.</p>
+  </section>
+</div>

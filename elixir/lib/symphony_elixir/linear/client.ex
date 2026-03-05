@@ -339,11 +339,11 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp post_graphql_request(payload, headers) do
-    Req.post(Config.linear_endpoint(),
-      headers: headers,
-      json: payload,
-      connect_options: [timeout: 30_000]
-    )
+    req_options = Application.get_env(:symphony_elixir, :linear_req_options, [])
+
+    [url: Config.linear_endpoint(), headers: headers, json: payload, connect_options: [timeout: 30_000]]
+    |> Keyword.merge(req_options)
+    |> Req.post()
   end
 
   defp decode_linear_response(%{"data" => %{"issues" => %{"nodes" => nodes}}}, assignee_filter) do

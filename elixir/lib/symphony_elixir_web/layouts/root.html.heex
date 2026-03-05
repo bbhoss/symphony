@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="csrf-token" content={get_csrf_token()} />
+    <title>Symphony Dashboard</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body { font-family: Menlo, Monaco, "Courier New", monospace; margin: 24px; background: #f4efe6; color: #1f1d1a; font-size: 13px; }
+      h1 { font-size: 20px; margin: 0; }
+      h2 { font-size: 15px; margin: 0 0 8px; border-bottom: 1px solid #d8cfbf; padding-bottom: 4px; }
+      .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+      .refresh-btn { font-family: inherit; font-size: 12px; padding: 4px 12px; background: #fffdf8; border: 1px solid #d8cfbf; border-radius: 6px; cursor: pointer; }
+      .refresh-btn:hover { background: #f0ebe2; }
+      .generated-at { color: #8a8070; margin-bottom: 16px; font-size: 12px; }
+      .counts { display: flex; gap: 16px; margin-bottom: 16px; }
+      .count { padding: 6px 12px; border-radius: 8px; background: #fffdf8; border: 1px solid #d8cfbf; }
+      .count.running { border-color: #4a9; }
+      .count.retrying { border-color: #c84; }
+      .section { margin-bottom: 20px; }
+      table { width: 100%; border-collapse: collapse; background: #fffdf8; border: 1px solid #d8cfbf; border-radius: 8px; overflow: hidden; }
+      th { text-align: left; padding: 6px 10px; background: #f0ebe2; border-bottom: 1px solid #d8cfbf; font-weight: 600; font-size: 12px; }
+      td { padding: 5px 10px; border-bottom: 1px solid #ece7dd; font-size: 12px; }
+      tr:last-child td { border-bottom: none; }
+      .mono { font-family: inherit; }
+      .error-text { color: #c44; }
+      .error-banner { padding: 12px; background: #ffeedd; border: 1px solid #c84; border-radius: 8px; margin-bottom: 16px; }
+      .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+      .stat { padding: 10px; background: #fffdf8; border: 1px solid #d8cfbf; border-radius: 8px; }
+      .stat-label { display: block; font-size: 11px; color: #8a8070; margin-bottom: 2px; }
+      .stat-value { display: block; font-size: 16px; font-weight: 600; }
+      .json-block { padding: 12px; border-radius: 8px; background: #fffdf8; border: 1px solid #d8cfbf; overflow: auto; font-size: 12px; white-space: pre-wrap; }
+      .dashboard { max-width: 1200px; }
+      .create-form { padding: 14px; background: #fffdf8; border: 1px solid #d8cfbf; border-radius: 8px; margin-bottom: 16px; }
+      .form-row { margin-bottom: 10px; }
+      .form-row label, .form-field label { display: block; font-size: 11px; color: #8a8070; margin-bottom: 3px; }
+      .form-row input, .form-row textarea, .form-field input, .form-field select { font-family: inherit; font-size: 12px; padding: 5px 8px; border: 1px solid #d8cfbf; border-radius: 4px; background: #fff; width: 100%; }
+      .form-row textarea { resize: vertical; }
+      .form-row-inline { display: flex; gap: 12px; margin-bottom: 10px; }
+      .form-field { flex: 1; }
+      .submit-btn { font-family: inherit; font-size: 12px; padding: 6px 16px; background: #4a9; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
+      .submit-btn:hover { background: #3a8; }
+      .delete-btn { font-family: inherit; font-size: 11px; padding: 2px 8px; background: #fffdf8; border: 1px solid #c44; color: #c44; border-radius: 4px; cursor: pointer; }
+      .delete-btn:hover { background: #ffeedd; }
+      .empty-state { color: #8a8070; font-style: italic; padding: 12px 0; }
+    </style>
+    <script type="module">
+      import {Socket} from "/assets/phoenix/phoenix.mjs"
+      import {LiveSocket} from "/assets/phoenix_live_view/phoenix_live_view.esm.js"
+
+      let csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
+      let liveSocket = new LiveSocket("/live", Socket, {params: {_csrf_token: csrfToken}})
+      liveSocket.connect()
+    </script>
+  </head>
+  <body>
+    {@inner_content}
+  </body>
+</html>

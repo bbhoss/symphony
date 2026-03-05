@@ -10,7 +10,6 @@ defmodule SymphonyElixir.TestSupport do
       alias SymphonyElixir.CLI
       alias SymphonyElixir.Codex.AppServer
       alias SymphonyElixir.Config
-      alias SymphonyElixir.HttpServer
       alias SymphonyElixir.Linear.Client
       alias SymphonyElixir.Linear.Issue
       alias SymphonyElixir.Orchestrator
@@ -22,7 +21,7 @@ defmodule SymphonyElixir.TestSupport do
       alias SymphonyElixir.Workspace
 
       import SymphonyElixir.TestSupport,
-        only: [write_workflow_file!: 1, write_workflow_file!: 2, restore_env: 2, stop_default_http_server: 0]
+        only: [write_workflow_file!: 1, write_workflow_file!: 2, restore_env: 2]
 
       setup do
         workflow_root =
@@ -36,7 +35,6 @@ defmodule SymphonyElixir.TestSupport do
         write_workflow_file!(workflow_file)
         Workflow.set_workflow_file_path(workflow_file)
         if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
-        stop_default_http_server()
 
         on_exit(fn ->
           Workflow.clear_workflow_file_path()
@@ -64,18 +62,6 @@ defmodule SymphonyElixir.TestSupport do
 
   def restore_env(key, nil), do: System.delete_env(key)
   def restore_env(key, value), do: System.put_env(key, value)
-
-  def stop_default_http_server do
-    case Process.whereis(SymphonyElixir.HttpServer) do
-      pid when is_pid(pid) ->
-        Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.HttpServer)
-        Process.exit(pid, :normal)
-        :ok
-
-      _ ->
-        :ok
-    end
-  end
 
   defp workflow_content(overrides) do
     config =

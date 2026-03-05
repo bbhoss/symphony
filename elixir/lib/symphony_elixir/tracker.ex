@@ -36,11 +36,14 @@ defmodule SymphonyElixir.Tracker do
     adapter().update_issue_state(issue_id, state_name)
   end
 
+  @adapter_modules %{
+    memory: SymphonyElixir.Tracker.Memory,
+    local: SymphonyElixir.Tracker.Local,
+    linear: SymphonyElixir.Linear.Adapter
+  }
+
   @spec adapter() :: module()
   def adapter do
-    case Config.tracker_kind() do
-      "memory" -> SymphonyElixir.Tracker.Memory
-      _ -> SymphonyElixir.Linear.Adapter
-    end
+    Map.get(@adapter_modules, Config.tracker_kind(), SymphonyElixir.Linear.Adapter)
   end
 end

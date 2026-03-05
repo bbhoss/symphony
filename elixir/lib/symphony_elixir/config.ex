@@ -159,7 +159,7 @@ defmodule SymphonyElixir.Config do
                            )
 
   @type workflow_payload :: Workflow.loaded_workflow()
-  @type tracker_kind :: String.t() | nil
+  @type tracker_kind :: :linear | :memory | :local | nil
   @type codex_runtime_settings :: %{
           approval_policy: String.t() | map(),
           thread_sandbox: String.t(),
@@ -388,8 +388,7 @@ defmodule SymphonyElixir.Config do
 
   defp require_tracker_kind do
     case tracker_kind() do
-      "linear" -> :ok
-      "memory" -> :ok
+      kind when kind in [:linear, :memory, :local] -> :ok
       nil -> {:error, :missing_tracker_kind}
       other -> {:error, {:unsupported_tracker_kind, other}}
     end
@@ -397,7 +396,7 @@ defmodule SymphonyElixir.Config do
 
   defp require_linear_token do
     case tracker_kind() do
-      "linear" ->
+      :linear ->
         if is_binary(linear_api_token()) do
           :ok
         else
@@ -411,7 +410,7 @@ defmodule SymphonyElixir.Config do
 
   defp require_linear_project do
     case tracker_kind() do
-      "linear" ->
+      :linear ->
         if is_binary(linear_project_slug()) do
           :ok
         else
@@ -780,14 +779,17 @@ defmodule SymphonyElixir.Config do
     |> String.downcase()
   end
 
+  @tracker_kind_map %{
+    "linear" => :linear,
+    "memory" => :memory,
+    "local" => :local
+  }
+
   defp normalize_tracker_kind(kind) when is_binary(kind) do
     kind
     |> String.trim()
     |> String.downcase()
-    |> case do
-      "" -> nil
-      normalized -> normalized
-    end
+    |> then(&Map.get(@tracker_kind_map, &1, &1))
   end
 
   defp normalize_tracker_kind(_kind), do: nil

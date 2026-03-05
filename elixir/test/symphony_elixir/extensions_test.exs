@@ -1,7 +1,6 @@
 defmodule SymphonyElixir.ExtensionsTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.HttpServer.State, as: HttpServerState
   alias SymphonyElixir.Linear.Adapter
   alias SymphonyElixir.Tracker.Memory
 
@@ -168,7 +167,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
 
-    assert Config.tracker_kind() == "memory"
+    assert Config.tracker_kind() == :memory
     assert SymphonyElixir.Tracker.adapter() == Memory
     assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_candidate_issues()
     assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_issues_by_states([" in progress ", 42])
@@ -278,252 +277,9 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:error, :issue_update_failed} = Adapter.update_issue_state("issue-1", "Odd")
   end
 
-  test "http server serves html and json endpoints end-to-end" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
-    orchestrator_name = Module.concat(__MODULE__, :HttpOrchestrator)
-    server_name = Module.concat(__MODULE__, :HttpServer)
-    {:ok, orchestrator_pid} = Orchestrator.start_link(name: orchestrator_name)
+  test "state json payload building covers running, retrying, and issue payloads with nil fields" do
+    alias SymphonyElixirWeb.StateJSON
 
-    {:ok, server_pid} =
-      HttpServer.start_link(
-        name: server_name,
-        host: "127.0.0.1",
-        port: 0,
-        orchestrator: orchestrator_name,
-        snapshot_timeout_ms: 1_000
-      )
-
-    on_exit(fn ->
-      if Process.alive?(server_pid), do: Process.exit(server_pid, :normal)
-      if Process.alive?(orchestrator_pid), do: Process.exit(orchestrator_pid, :normal)
-    end)
-
-    running_entry = %{
-      pid: self(),
-      ref: make_ref(),
-      identifier: "MT-HTTP",
-      issue: %Issue{id: "issue-http", identifier: "MT-HTTP", state: "In Progress"},
-      session_id: "thread-http",
-      turn_count: 7,
-      codex_app_server_pid: nil,
-      last_codex_message: "rendered",
-      last_codex_timestamp: nil,
-      last_codex_event: :notification,
-      codex_input_tokens: 4,
-      codex_output_tokens: 8,
-      codex_total_tokens: 12,
-      started_at: DateTime.utc_now()
-    }
-
-    :sys.replace_state(orchestrator_pid, fn state ->
-      %{
-        state
-        | running: %{"issue-http" => running_entry},
-          retry_attempts: %{
-            "issue-retry" => %{
-              attempt: 2,
-              due_at_ms: System.monotonic_time(:millisecond) + 2_000,
-              identifier: "MT-RETRY",
-              error: "boom"
-            }
-          }
-      }
-    end)
-
-    port = wait_for_bound_port(server_name)
-    assert HttpServer.bound_port(server_name) == port
-
-    {status, headers, body} = http_request(port, "GET", "/")
-    assert status == 200
-    assert Map.fetch!(headers, "content-type") =~ "text/html"
-    assert body =~ "Symphony Dashboard"
-
-    {status, headers, body} = http_request(port, "GET", "/api/v1/state")
-    assert status == 200
-    assert Map.fetch!(headers, "content-type") =~ "application/json"
-
-    assert %{
-             "counts" => %{"running" => 1, "retrying" => 1},
-             "running" => [%{"issue_identifier" => "MT-HTTP", "last_message" => "rendered", "turn_count" => 7}],
-             "retrying" => [%{"issue_identifier" => "MT-RETRY", "error" => "boom"}]
-           } = Jason.decode!(body)
-
-    :sys.replace_state(orchestrator_pid, fn state ->
-      update_in(state.running["issue-http"].last_codex_message, fn _ -> %{message: "structured"} end)
-    end)
-
-    {status, _headers, body} = http_request(port, "GET", "/api/v1/MT-HTTP")
-    assert status == 200
-
-    assert %{
-             "issue_identifier" => "MT-HTTP",
-             "status" => "running",
-             "running" => %{"last_message" => "structured", "turn_count" => 7},
-             "retry" => nil
-           } = Jason.decode!(body)
-
-    {status, _headers, body} = http_request(port, "GET", "/api/v1/MT-RETRY")
-    assert status == 200
-    assert %{"status" => "retrying", "retry" => %{"attempt" => 2}} = Jason.decode!(body)
-
-    {status, _headers, body} = http_request(port, "GET", "/api/v1/MT-MISSING")
-    assert status == 404
-    assert %{"error" => %{"code" => "issue_not_found"}} = Jason.decode!(body)
-
-    {status, _headers, body} = http_request(port, "POST", "/api/v1/refresh", "")
-    assert status == 202
-    assert %{"coalesced" => false, "operations" => ["poll", "reconcile"], "queued" => true} = Jason.decode!(body)
-  end
-
-  test "http server escapes html-sensitive characters in rendered dashboard payload" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
-    orchestrator_name = Module.concat(__MODULE__, :EscapingHttpOrchestrator)
-    server_name = Module.concat(__MODULE__, :EscapingHttpServer)
-    {:ok, orchestrator_pid} = Orchestrator.start_link(name: orchestrator_name)
-
-    {:ok, server_pid} =
-      HttpServer.start_link(
-        name: server_name,
-        host: "127.0.0.1",
-        port: 0,
-        orchestrator: orchestrator_name,
-        snapshot_timeout_ms: 1_000
-      )
-
-    on_exit(fn ->
-      if Process.alive?(server_pid), do: Process.exit(server_pid, :normal)
-      if Process.alive?(orchestrator_pid), do: Process.exit(orchestrator_pid, :normal)
-    end)
-
-    running_entry = %{
-      pid: self(),
-      ref: make_ref(),
-      identifier: "MT-897",
-      issue: %Issue{id: "issue-html", identifier: "MT-897", state: "In Progress"},
-      session_id: "thread-html",
-      turn_count: 7,
-      codex_app_server_pid: nil,
-      last_codex_message: "<script>window.xssed=1</script>",
-      last_codex_timestamp: nil,
-      last_codex_event: :notification,
-      codex_input_tokens: 4,
-      codex_output_tokens: 8,
-      codex_total_tokens: 12,
-      started_at: DateTime.utc_now()
-    }
-
-    :sys.replace_state(orchestrator_pid, fn state ->
-      %{state | running: %{"issue-html" => running_entry}, retry_attempts: %{}}
-    end)
-
-    port = wait_for_bound_port(server_name)
-    {status, _headers, body} = http_request(port, "GET", "/")
-    assert status == 200
-    refute String.contains?(body, "<script>window.xssed=1</script>")
-    assert body =~ "&lt;script&gt;window.xssed=1&lt;/script&gt;"
-  end
-
-  test "http server returns method, parse, timeout, and unavailable errors" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
-    server_name = Module.concat(__MODULE__, :ErrorHttpServer)
-    unavailable_orchestrator = Module.concat(__MODULE__, :UnavailableOrchestrator)
-
-    {:ok, server_pid} =
-      HttpServer.start_link(
-        name: server_name,
-        host: "127.0.0.1",
-        port: 0,
-        orchestrator: unavailable_orchestrator,
-        snapshot_timeout_ms: 5
-      )
-
-    on_exit(fn ->
-      if Process.alive?(server_pid), do: Process.exit(server_pid, :normal)
-    end)
-
-    port = wait_for_bound_port(server_name)
-
-    {status, _headers, body} = http_request(port, "POST", "/api/v1/state", "")
-    assert status == 405
-    assert %{"error" => %{"code" => "method_not_allowed"}} = Jason.decode!(body)
-
-    {status, _headers, body} = http_request(port, "GET", "/api/v1/refresh")
-    assert status == 405
-    assert %{"error" => %{"code" => "method_not_allowed"}} = Jason.decode!(body)
-
-    {status, _headers, body} = http_request(port, "POST", "/", "")
-    assert status == 405
-    assert %{"error" => %{"code" => "method_not_allowed"}} = Jason.decode!(body)
-
-    {status, _headers, body} = http_request(port, "POST", "/api/v1/MT-1", "")
-    assert status == 405
-    assert %{"error" => %{"code" => "method_not_allowed"}} = Jason.decode!(body)
-
-    {status, _headers, body} = http_request(port, "GET", "/unknown")
-    assert status == 404
-    assert %{"error" => %{"code" => "not_found"}} = Jason.decode!(body)
-
-    {status, _headers, body} = http_request(port, "GET", "/api/v1/state")
-    assert status == 200
-    assert %{"error" => %{"code" => "snapshot_unavailable"}} = Jason.decode!(body)
-
-    {status, _headers, body} = http_request(port, "POST", "/api/v1/refresh", "")
-    assert status == 503
-    assert %{"error" => %{"code" => "orchestrator_unavailable"}} = Jason.decode!(body)
-
-    assert http_raw_request(port, "BROKEN\r\n\r\n") =~ "400 Bad Request"
-
-    timeout_orchestrator = Module.concat(__MODULE__, :TimeoutOrchestrator)
-    {:ok, timeout_pid} = SlowOrchestrator.start_link(name: timeout_orchestrator)
-
-    timeout_server_name = Module.concat(__MODULE__, :TimeoutHttpServer)
-
-    {:ok, timeout_server_pid} =
-      HttpServer.start_link(
-        name: timeout_server_name,
-        host: "127.0.0.1",
-        port: 0,
-        orchestrator: timeout_orchestrator,
-        snapshot_timeout_ms: 1
-      )
-
-    on_exit(fn ->
-      if Process.alive?(timeout_server_pid), do: Process.exit(timeout_server_pid, :normal)
-      if Process.alive?(timeout_pid), do: Process.exit(timeout_pid, :normal)
-    end)
-
-    timeout_port = wait_for_bound_port(timeout_server_name)
-    {status, _headers, body} = http_request(timeout_port, "GET", "/api/v1/state")
-    assert status == 200
-    assert %{"error" => %{"code" => "snapshot_timeout"}} = Jason.decode!(body)
-  end
-
-  test "http server child spec, ignore branch, invalid host, and bound_port fallback behave as expected" do
-    spec = HttpServer.child_spec(name: :child_spec_server, port: 0)
-    assert spec.id == :child_spec_server
-    assert spec.start == {HttpServer, :start_link, [[name: :child_spec_server, port: 0]]}
-
-    Application.put_env(:symphony_elixir, :server_port_override, 0)
-
-    {:ok, default_pid} = HttpServer.start_link()
-    on_exit(fn -> if Process.alive?(default_pid), do: Process.exit(default_pid, :normal) end)
-
-    {:ok, localhost_pid} = HttpServer.start_link(name: :localhost_server, host: "localhost", port: 0)
-
-    on_exit(fn ->
-      if Process.alive?(localhost_pid), do: Process.exit(localhost_pid, :normal)
-    end)
-
-    assert :ignore = HttpServer.start_link(name: :ignored_server, port: nil)
-    assert is_integer(HttpServer.bound_port())
-    assert is_integer(wait_for_bound_port(:localhost_server))
-    assert HttpServer.bound_port(:ignored_server) == nil
-    assert {:ok, {127, 0, 0, 1}} = HttpServer.parse_host_for_test({127, 0, 0, 1})
-    assert {:ok, {0, 0, 0, 0, 0, 0, 0, 1}} = HttpServer.parse_host_for_test({0, 0, 0, 0, 0, 0, 0, 1})
-    assert {:stop, _reason} = HttpServer.init(name: :bad_host_server, host: "bad host", port: 0)
-  end
-
-  test "http server covers callback branches and synthetic snapshot payloads" do
     snapshot = %{
       running: [
         %{
@@ -531,10 +287,10 @@ defmodule SymphonyElixir.ExtensionsTest do
           identifier: "MT-BOTH",
           state: "In Progress",
           session_id: "thread-both",
-          codex_app_server_pid: nil,
-          codex_input_tokens: 0,
-          codex_output_tokens: 0,
-          codex_total_tokens: 0,
+          turn_count: 7,
+          codex_input_tokens: 4,
+          codex_output_tokens: 8,
+          codex_total_tokens: 12,
           started_at: nil,
           last_codex_timestamp: nil,
           last_codex_message: %{unexpected: true},
@@ -555,7 +311,6 @@ defmodule SymphonyElixir.ExtensionsTest do
     }
 
     orchestrator_name = Module.concat(__MODULE__, :StaticOrchestrator)
-    server_name = Module.concat(__MODULE__, :StaticHttpServer)
 
     {:ok, orchestrator_pid} =
       StaticOrchestrator.start_link(
@@ -564,247 +319,748 @@ defmodule SymphonyElixir.ExtensionsTest do
         refresh: %{queued: true, coalesced: true, requested_at: DateTime.utc_now(), operations: ["poll"]}
       )
 
-    {:ok, server_pid} =
-      HttpServer.start_link(
-        name: server_name,
-        host: "127.0.0.1",
-        port: 0,
-        orchestrator: orchestrator_name,
-        snapshot_timeout_ms: 50
-      )
-
     on_exit(fn ->
-      if Process.alive?(server_pid), do: Process.exit(server_pid, :normal)
       if Process.alive?(orchestrator_pid), do: Process.exit(orchestrator_pid, :normal)
     end)
 
-    port = wait_for_bound_port(server_name)
+    # state_payload: counts, running entry shape, retry entry shape
+    payload = StateJSON.state_payload(orchestrator_name, 5_000)
+    assert %{counts: %{running: 1, retrying: 1}, generated_at: generated_at} = payload
+    assert is_binary(generated_at)
 
-    {status, _headers, body} =
-      http_request(
-        port,
-        "GET",
-        "/api/v1/state",
-        nil,
-        [{"broken-header", nil}]
-      )
+    assert [running] = payload.running
+    assert running.issue_identifier == "MT-BOTH"
+    assert running.turn_count == 7
+    assert running.last_message == nil
+    assert running.started_at == nil
+    assert running.last_event_at == nil
+    assert running.tokens == %{input_tokens: 4, output_tokens: 8, total_tokens: 12}
 
-    assert status == 200
-    assert %{"counts" => %{"running" => 1, "retrying" => 1}} = Jason.decode!(body)
+    assert [retrying] = payload.retrying
+    assert retrying.issue_identifier == "MT-BOTH"
+    assert retrying.attempt == 3
+    assert retrying.due_at == nil
+    assert retrying.error == "still retrying"
 
-    {status, _headers, body} = http_request(port, "GET", "/api/v1/MT-BOTH")
-    assert status == 200
-    assert %{"status" => "running", "running" => %{"last_message" => nil}, "retry" => %{"due_at" => nil}} = Jason.decode!(body)
+    # issue_payload: both running and retrying exist for same issue → status "running"
+    assert {:ok, issue} = StateJSON.issue_payload("MT-BOTH", orchestrator_name, 5_000)
+    assert issue.status == "running"
+    assert issue.issue_id == "issue-both"
+    assert issue.running.turn_count == 7
+    assert issue.running.last_message == nil
+    assert issue.retry.due_at == nil
+    assert issue.retry.attempt == 3
+    assert issue.attempts == %{restart_count: 2, current_retry_attempt: 3}
+    assert issue.recent_events == []
+    assert issue.last_error == "still retrying"
 
-    {status, _headers, body} =
-      http_request(
-        port,
-        "POST",
-        "/api/v1/refresh",
-        "",
-        [{"content-length", "nope"}]
-      )
+    # issue not found
+    assert {:error, :issue_not_found} = StateJSON.issue_payload("MT-MISSING", orchestrator_name, 5_000)
+  end
 
-    assert status == 202
-    assert %{"coalesced" => true} = Jason.decode!(body)
+  test "state json handles fully populated entries with timestamps and due_at" do
+    alias SymphonyElixirWeb.StateJSON
 
-    {status, _headers, body} =
-      http_partial_request(port, "POST /api/v1/refresh HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-length: 4\r\n\r\nbo", "dy")
+    now = DateTime.utc_now()
 
-    assert status == 202
-    assert %{"queued" => true} = Jason.decode!(body)
+    snapshot = %{
+      running: [
+        %{
+          issue_id: "issue-full",
+          identifier: "MT-FULL",
+          state: "In Progress",
+          session_id: "thread-full",
+          turn_count: 5,
+          codex_input_tokens: 100,
+          codex_output_tokens: 200,
+          codex_total_tokens: 300,
+          started_at: now,
+          last_codex_timestamp: now,
+          last_codex_message: %{message: "working on it"},
+          last_codex_event: :notification
+        }
+      ],
+      retrying: [
+        %{
+          issue_id: "issue-retry",
+          identifier: "MT-RETRY",
+          attempt: 2,
+          due_in_ms: 60_000,
+          error: "timeout"
+        }
+      ],
+      codex_totals: %{input_tokens: 100, output_tokens: 200, total_tokens: 300, seconds_running: 45},
+      rate_limits: %{remaining: 50}
+    }
 
-    assert is_binary(
-             http_partial_close_request(
-               port,
-               "POST /api/v1/refresh HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-length: 4\r\n\r\nbo"
-             )
-           )
+    orchestrator_name = Module.concat(__MODULE__, :FullOrchestrator)
 
-    oversized_header_response =
-      http_raw_request(
-        port,
-        "GET /api/v1/state HTTP/1.1\r\nhost: 127.0.0.1\r\nx-overflow: #{String.duplicate("a", 9_000)}\r\n\r\n"
-      )
+    {:ok, orchestrator_pid} =
+      StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
 
-    assert oversized_header_response =~ "413 Payload Too Large"
-    assert oversized_header_response =~ "\"headers_too_large\""
+    on_exit(fn ->
+      if Process.alive?(orchestrator_pid), do: Process.exit(orchestrator_pid, :normal)
+    end)
 
-    oversized_body_response =
-      http_raw_request(
-        port,
-        "POST /api/v1/refresh HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-length: 1048577\r\n\r\n"
-      )
+    payload = StateJSON.state_payload(orchestrator_name, 5_000)
 
-    assert oversized_body_response =~ "413 Payload Too Large"
-    assert oversized_body_response =~ "\"body_too_large\""
+    # running entry: timestamps are ISO8601 strings, structured message extracted
+    assert [running] = payload.running
+    assert is_binary(running.started_at)
+    assert running.started_at =~ ~r/^\d{4}-\d{2}-\d{2}T/
+    assert is_binary(running.last_event_at)
+    assert running.last_message == "working on it"
+    assert running.tokens == %{input_tokens: 100, output_tokens: 200, total_tokens: 300}
 
-    assert http_partial_close_request(
-             port,
-             "GET /api/v1/state HTTP/1.1\r\nhost: 127.0.0.1"
-           ) == ""
+    # retrying entry: due_at is a future ISO8601 string
+    assert [retrying] = payload.retrying
+    assert is_binary(retrying.due_at)
+    assert retrying.due_at =~ ~r/^\d{4}-\d{2}-\d{2}T/
 
-    assert {:error, :bad_request} = HttpServer.parse_raw_request_for_test("GET /api/v1/state HTTP/1.1")
-    assert {:error, :bad_request} = HttpServer.parse_raw_request_for_test("\r\n\r\n")
+    # codex totals and rate limits passed through
+    assert payload.codex_totals == %{input_tokens: 100, output_tokens: 200, total_tokens: 300, seconds_running: 45}
+    assert payload.rate_limits == %{remaining: 50}
 
-    unexpected_orchestrator = Module.concat(__MODULE__, :UnexpectedOrchestrator)
-    unexpected_server = Module.concat(__MODULE__, :UnexpectedHttpServer)
+    # issue detail: running-only issue has recent_events with timestamp
+    assert {:ok, issue} = StateJSON.issue_payload("MT-FULL", orchestrator_name, 5_000)
+    assert issue.status == "running"
+    assert issue.running.started_at =~ ~r/^\d{4}-\d{2}-\d{2}T/
+    assert issue.running.last_message == "working on it"
+    assert issue.retry == nil
+    assert issue.last_error == nil
+    assert length(issue.recent_events) == 1
+    assert hd(issue.recent_events).message == "working on it"
 
-    {:ok, unexpected_orchestrator_pid} =
-      StaticOrchestrator.start_link(name: unexpected_orchestrator, snapshot: :unexpected)
+    # retrying-only issue
+    assert {:ok, retry_issue} = StateJSON.issue_payload("MT-RETRY", orchestrator_name, 5_000)
+    assert retry_issue.status == "retrying"
+    assert retry_issue.running == nil
+    assert retry_issue.retry.attempt == 2
+    assert is_binary(retry_issue.retry.due_at)
+    assert retry_issue.last_error == "timeout"
+    assert retry_issue.recent_events == []
+    assert retry_issue.attempts == %{restart_count: 1, current_retry_attempt: 2}
+  end
 
-    {:ok, unexpected_server_pid} =
-      HttpServer.start_link(
-        name: unexpected_server,
-        host: "127.0.0.1",
-        port: 0,
-        orchestrator: unexpected_orchestrator,
-        snapshot_timeout_ms: 50
+  test "state json handles all summarize_message variants" do
+    alias SymphonyElixirWeb.StateJSON
+
+    base_entry = %{
+      issue_id: "issue-msg",
+      identifier: "MT-MSG",
+      state: "In Progress",
+      session_id: "thread-msg",
+      turn_count: 1,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      started_at: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: :notification
+    }
+
+    # Wrapped map with :message key
+    entry_wrapped = Map.put(base_entry, :last_codex_message, %{message: "wrapped text"})
+    assert %{last_message: "wrapped text"} = StateJSON.running_entry_payload(entry_wrapped)
+
+    # Bare binary string
+    entry_string = Map.put(base_entry, :last_codex_message, "plain text")
+    assert %{last_message: "plain text"} = StateJSON.running_entry_payload(entry_string)
+
+    # Nil message
+    entry_nil = Map.put(base_entry, :last_codex_message, nil)
+    assert %{last_message: nil} = StateJSON.running_entry_payload(entry_nil)
+
+    # Non-matching map (no :message key)
+    entry_other = Map.put(base_entry, :last_codex_message, %{unexpected: true})
+    assert %{last_message: nil} = StateJSON.running_entry_payload(entry_other)
+
+    # Atom (non-binary, non-map)
+    entry_atom = Map.put(base_entry, :last_codex_message, :some_atom)
+    assert %{last_message: nil} = StateJSON.running_entry_payload(entry_atom)
+  end
+
+  test "state json running_entry_payload defaults turn_count to 0 when missing" do
+    alias SymphonyElixirWeb.StateJSON
+
+    entry_no_turn = %{
+      issue_id: "issue-no-turn",
+      identifier: "MT-NO-TURN",
+      state: "In Progress",
+      session_id: "thread",
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      started_at: nil,
+      last_codex_timestamp: nil,
+      last_codex_message: nil,
+      last_codex_event: nil
+    }
+
+    result = StateJSON.running_entry_payload(entry_no_turn)
+    assert result.turn_count == 0
+  end
+
+  test "state json retry_entry_payload with integer due_in_ms" do
+    alias SymphonyElixirWeb.StateJSON
+
+    entry = %{
+      issue_id: "issue-retry",
+      identifier: "MT-RETRY",
+      attempt: 4,
+      due_in_ms: 120_000,
+      error: "crash"
+    }
+
+    result = StateJSON.retry_entry_payload(entry)
+    assert result.issue_id == "issue-retry"
+    assert result.issue_identifier == "MT-RETRY"
+    assert result.attempt == 4
+    assert result.error == "crash"
+    assert is_binary(result.due_at)
+    assert result.due_at =~ ~r/^\d{4}-\d{2}-\d{2}T/
+  end
+
+  test "state json handles unavailable and timeout orchestrator" do
+    alias SymphonyElixirWeb.StateJSON
+
+    payload = StateJSON.state_payload(:nonexistent_orchestrator, 5_000)
+    assert %{error: %{code: "snapshot_unavailable"}} = payload
+    assert is_binary(payload.generated_at)
+
+    timeout_orchestrator = Module.concat(__MODULE__, :TimeoutOrchestrator)
+    {:ok, timeout_pid} = SlowOrchestrator.start_link(name: timeout_orchestrator)
+
+    on_exit(fn ->
+      if Process.alive?(timeout_pid), do: Process.exit(timeout_pid, :normal)
+    end)
+
+    timeout_payload = StateJSON.state_payload(timeout_orchestrator, 1)
+    assert %{error: %{code: "snapshot_timeout"}} = timeout_payload
+    assert is_binary(timeout_payload.generated_at)
+
+    # issue_payload also returns not_found for unavailable orchestrator
+    assert {:error, :issue_not_found} = StateJSON.issue_payload("MT-1", :nonexistent_orchestrator, 5_000)
+  end
+
+  test "state json refresh payload converts requested_at to iso8601" do
+    orchestrator_name = Module.concat(__MODULE__, :RefreshOrchestrator)
+    requested_at = DateTime.utc_now()
+
+    {:ok, orchestrator_pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: %{running: [], retrying: [], codex_totals: nil, rate_limits: nil},
+        refresh: %{queued: true, coalesced: false, requested_at: requested_at, operations: ["poll", "reconcile"]}
       )
 
     on_exit(fn ->
-      if Process.alive?(unexpected_server_pid), do: Process.exit(unexpected_server_pid, :normal)
-      if Process.alive?(unexpected_orchestrator_pid), do: Process.exit(unexpected_orchestrator_pid, :normal)
+      if Process.alive?(orchestrator_pid), do: Process.exit(orchestrator_pid, :normal)
     end)
 
-    unexpected_port = wait_for_bound_port(unexpected_server)
-    {status, _headers, body} = http_request(unexpected_port, "GET", "/api/v1/MT-BOTH")
-    assert status == 404
-    assert %{"error" => %{"code" => "issue_not_found"}} = Jason.decode!(body)
-
-    {:ok, closed_socket} = :gen_tcp.listen(0, [:binary, {:active, false}])
-    :gen_tcp.close(closed_socket)
-
-    closed_state = %HttpServerState{
-      listen_socket: closed_socket,
-      port: 0,
-      orchestrator: orchestrator_name,
-      snapshot_timeout_ms: 1
-    }
-
-    assert {:stop, :normal, ^closed_state} = HttpServer.handle_info(:accept, closed_state)
-
-    {:ok, listen_socket} = :gen_tcp.listen(0, [:binary, {:active, false}, {:reuseaddr, true}])
-    {:ok, listen_port} = :inet.port(listen_socket)
-    acceptor = spawn(fn -> {:ok, _socket} = :gen_tcp.accept(listen_socket) end)
-    {:ok, client_socket} = :gen_tcp.connect(~c"127.0.0.1", listen_port, [:binary, {:active, false}], 1_000)
-
-    invalid_state = %HttpServerState{
-      listen_socket: client_socket,
-      port: 0,
-      orchestrator: orchestrator_name,
-      snapshot_timeout_ms: 1
-    }
-
-    assert {:stop, :einval, ^invalid_state} = HttpServer.handle_info(:accept, invalid_state)
-    :gen_tcp.close(client_socket)
-    :gen_tcp.close(listen_socket)
-    Process.exit(acceptor, :kill)
-
-    {:ok, terminate_socket} = :gen_tcp.listen(0, [:binary, {:active, false}])
-
-    assert :ok =
-             HttpServer.terminate(
-               :normal,
-               %HttpServerState{
-                 listen_socket: terminate_socket,
-                 port: 0,
-                 orchestrator: orchestrator_name,
-                 snapshot_timeout_ms: 1
-               }
-             )
-
-    assert :ok = HttpServer.terminate(:normal, :not_a_state)
+    # Simulate what StateController.refresh/2 does
+    payload = Orchestrator.request_refresh(orchestrator_name)
+    refute payload == :unavailable
+    converted = Map.update!(payload, :requested_at, &DateTime.to_iso8601/1)
+    assert is_binary(converted.requested_at)
+    assert converted.requested_at =~ ~r/^\d{4}-\d{2}-\d{2}T/
+    assert converted.queued == true
+    assert converted.coalesced == false
+    assert converted.operations == ["poll", "reconcile"]
   end
 
-  defp wait_for_bound_port(server_name) do
-    assert_eventually(fn ->
-      is_integer(HttpServer.bound_port(server_name))
+  test "linear client fetches and normalizes issues via Req.Test" do
+    alias SymphonyElixir.Linear.Client
+
+    Req.Test.stub(Client, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      request = Jason.decode!(body)
+
+      assert request["query"] =~ "SymphonyLinearPoll"
+      assert request["variables"]["projectSlug"] == "project"
+      assert request["variables"]["stateNames"] == ["Todo", "In Progress"]
+
+      Req.Test.json(conn, %{
+        "data" => %{
+          "issues" => %{
+            "nodes" => [
+              %{
+                "id" => "issue-1",
+                "identifier" => "PROJ-1",
+                "title" => "Fix the bug",
+                "description" => "It's broken",
+                "priority" => 2,
+                "state" => %{"name" => "Todo"},
+                "branchName" => "fix-the-bug",
+                "url" => "https://linear.app/proj/issue/PROJ-1",
+                "assignee" => nil,
+                "labels" => %{"nodes" => [%{"name" => "Bug"}, %{"name" => "P1"}]},
+                "inverseRelations" => %{"nodes" => []},
+                "createdAt" => "2025-01-15T10:00:00Z",
+                "updatedAt" => "2025-01-15T12:00:00Z"
+              },
+              %{
+                "id" => "issue-2",
+                "identifier" => "PROJ-2",
+                "title" => "Add feature",
+                "description" => nil,
+                "priority" => nil,
+                "state" => %{"name" => "In Progress"},
+                "branchName" => nil,
+                "url" => "https://linear.app/proj/issue/PROJ-2",
+                "assignee" => %{"id" => "user-1"},
+                "labels" => %{"nodes" => []},
+                "inverseRelations" => %{"nodes" => []},
+                "createdAt" => "2025-01-16T10:00:00Z",
+                "updatedAt" => nil
+              }
+            ],
+            "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+          }
+        }
+      })
     end)
 
-    HttpServer.bound_port(server_name)
+    assert {:ok, issues} = Client.fetch_candidate_issues()
+    assert length(issues) == 2
+
+    [issue1, issue2] = issues
+    assert %Issue{} = issue1
+    assert issue1.id == "issue-1"
+    assert issue1.identifier == "PROJ-1"
+    assert issue1.title == "Fix the bug"
+    assert issue1.description == "It's broken"
+    assert issue1.priority == 2
+    assert issue1.state == "Todo"
+    assert issue1.branch_name == "fix-the-bug"
+    assert issue1.url == "https://linear.app/proj/issue/PROJ-1"
+    assert issue1.assignee_id == nil
+    assert issue1.labels == ["bug", "p1"]
+    assert issue1.blocked_by == []
+    assert issue1.assigned_to_worker == true
+    assert %DateTime{} = issue1.created_at
+    assert %DateTime{} = issue1.updated_at
+
+    assert issue2.id == "issue-2"
+    assert issue2.priority == nil
+    assert issue2.branch_name == nil
+    assert issue2.description == nil
+    assert issue2.assignee_id == "user-1"
+    assert issue2.labels == []
+    assert issue2.updated_at == nil
   end
 
-  defp http_request(port, method, path, body \\ nil, extra_headers \\ []) do
-    request = build_http_request(method, path, body, extra_headers)
+  test "linear client handles pagination across multiple pages via Req.Test" do
+    alias SymphonyElixir.Linear.Client
 
-    response = http_raw_request(port, request)
-    [header_block, response_body] = String.split(response, "\r\n\r\n", parts: 2)
-    [status_line | header_lines] = String.split(header_block, "\r\n")
-    [_, status_code, _reason] = String.split(status_line, " ", parts: 3)
+    page = :counters.new(1, [])
 
-    headers =
-      Enum.reduce(header_lines, %{}, fn line, acc ->
-        case String.split(line, ":", parts: 2) do
-          [name, value] -> Map.put(acc, String.downcase(name), String.trim(value))
-          _ -> acc
-        end
-      end)
+    Req.Test.stub(Client, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      request = Jason.decode!(body)
+      current_page = :counters.get(page, 1)
+      :counters.add(page, 1, 1)
 
-    {String.to_integer(status_code), headers, response_body}
-  end
+      case current_page do
+        1 ->
+          assert request["variables"]["after"] == nil
 
-  defp http_raw_request(port, request) do
-    {:ok, socket} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false], 1_000)
-    :ok = :gen_tcp.send(socket, request)
-    response = recv_all(socket, "")
-    :gen_tcp.close(socket)
-    response
-  end
+          Req.Test.json(conn, %{
+            "data" => %{
+              "issues" => %{
+                "nodes" => [
+                  %{
+                    "id" => "page1-issue",
+                    "identifier" => "PROJ-1",
+                    "title" => "Page 1",
+                    "description" => nil,
+                    "priority" => 1,
+                    "state" => %{"name" => "Todo"},
+                    "branchName" => nil,
+                    "url" => nil,
+                    "assignee" => nil,
+                    "labels" => %{"nodes" => []},
+                    "inverseRelations" => %{"nodes" => []},
+                    "createdAt" => nil,
+                    "updatedAt" => nil
+                  }
+                ],
+                "pageInfo" => %{"hasNextPage" => true, "endCursor" => "cursor-1"}
+              }
+            }
+          })
 
-  defp http_partial_request(port, head, tail) do
-    {:ok, socket} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false], 1_000)
-    :ok = :gen_tcp.send(socket, head)
-    Process.sleep(10)
-    :ok = :gen_tcp.send(socket, tail)
-    response = recv_all(socket, "")
-    :gen_tcp.close(socket)
-    [header_block, body] = String.split(response, "\r\n\r\n", parts: 2)
-    [status_line | _] = String.split(header_block, "\r\n")
-    [_, status_code, _reason] = String.split(status_line, " ", parts: 3)
-    {String.to_integer(status_code), %{}, body}
-  end
+        2 ->
+          assert request["variables"]["after"] == "cursor-1"
 
-  defp http_partial_close_request(port, request) do
-    {:ok, socket} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false], 1_000)
-    :ok = :gen_tcp.send(socket, request)
-    :ok = :gen_tcp.shutdown(socket, :write)
-    response = recv_all(socket, "")
-    :gen_tcp.close(socket)
-    response
-  end
-
-  defp build_http_request(method, path, body, extra_headers) do
-    headers =
-      [
-        {"host", "127.0.0.1"},
-        {"connection", "close"}
-      ] ++ extra_headers
-
-    headers =
-      if is_binary(body) and not Enum.any?(headers, fn {name, _value} -> name == "content-length" end) do
-        headers ++ [{"content-length", Integer.to_string(byte_size(body))}]
-      else
-        headers
+          Req.Test.json(conn, %{
+            "data" => %{
+              "issues" => %{
+                "nodes" => [
+                  %{
+                    "id" => "page2-issue",
+                    "identifier" => "PROJ-2",
+                    "title" => "Page 2",
+                    "description" => nil,
+                    "priority" => 1,
+                    "state" => %{"name" => "Todo"},
+                    "branchName" => nil,
+                    "url" => nil,
+                    "assignee" => nil,
+                    "labels" => %{"nodes" => []},
+                    "inverseRelations" => %{"nodes" => []},
+                    "createdAt" => nil,
+                    "updatedAt" => nil
+                  }
+                ],
+                "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+              }
+            }
+          })
       end
+    end)
 
-    [
-      "#{method} #{path} HTTP/1.1\r\n",
-      Enum.map(headers, fn
-        {name, nil} -> "#{name}\r\n"
-        {name, value} -> "#{name}: #{value}\r\n"
-      end),
-      "\r\n",
-      body || ""
-    ]
-    |> IO.iodata_to_binary()
+    assert {:ok, issues} = Client.fetch_candidate_issues()
+    assert length(issues) == 2
+    assert Enum.map(issues, & &1.id) == ["page1-issue", "page2-issue"]
   end
 
-  defp recv_all(socket, acc) do
-    case :gen_tcp.recv(socket, 0, 1_000) do
-      {:ok, chunk} -> recv_all(socket, acc <> chunk)
-      {:error, :closed} -> acc
-    end
+  test "linear client handles GraphQL errors and non-200 responses via Req.Test" do
+    alias SymphonyElixir.Linear.Client
+
+    # GraphQL error in response body
+    Req.Test.stub(Client, fn conn ->
+      Req.Test.json(conn, %{
+        "errors" => [%{"message" => "Rate limited", "extensions" => %{"code" => "RATE_LIMITED"}}]
+      })
+    end)
+
+    assert {:error, {:linear_graphql_errors, [%{"message" => "Rate limited"} | _]}} =
+             Client.fetch_candidate_issues()
+
+    # Non-200 HTTP status
+    Req.Test.stub(Client, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(500, Jason.encode!(%{"error" => "Internal Server Error"}))
+    end)
+
+    assert {:error, {:linear_api_status, 500}} = Client.fetch_candidate_issues()
+
+    # Unknown/malformed response body
+    Req.Test.stub(Client, fn conn ->
+      Req.Test.json(conn, %{"unexpected" => "shape"})
+    end)
+
+    assert {:error, :linear_unknown_payload} = Client.fetch_candidate_issues()
+  end
+
+  test "linear client fetch_issues_by_states via Req.Test" do
+    alias SymphonyElixir.Linear.Client
+
+    Req.Test.stub(Client, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      request = Jason.decode!(body)
+      assert request["variables"]["stateNames"] == ["Done", "Closed"]
+
+      Req.Test.json(conn, %{
+        "data" => %{
+          "issues" => %{
+            "nodes" => [
+              %{
+                "id" => "done-1",
+                "identifier" => "PROJ-10",
+                "title" => "Done issue",
+                "description" => nil,
+                "priority" => nil,
+                "state" => %{"name" => "Done"},
+                "branchName" => nil,
+                "url" => nil,
+                "assignee" => nil,
+                "labels" => %{"nodes" => []},
+                "inverseRelations" => %{"nodes" => []},
+                "createdAt" => nil,
+                "updatedAt" => nil
+              }
+            ],
+            "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+          }
+        }
+      })
+    end)
+
+    assert {:ok, [issue]} = Client.fetch_issues_by_states(["Done", "Closed"])
+    assert issue.id == "done-1"
+    assert issue.state == "Done"
+
+    # Empty state list returns empty without making a request
+    assert {:ok, []} = Client.fetch_issues_by_states([])
+  end
+
+  test "linear client fetch_issue_states_by_ids via Req.Test" do
+    alias SymphonyElixir.Linear.Client
+
+    Req.Test.stub(Client, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      request = Jason.decode!(body)
+      assert request["query"] =~ "SymphonyLinearIssuesById"
+      assert request["variables"]["ids"] == ["id-1", "id-2"]
+
+      Req.Test.json(conn, %{
+        "data" => %{
+          "issues" => %{
+            "nodes" => [
+              %{
+                "id" => "id-1",
+                "identifier" => "PROJ-1",
+                "title" => "Issue 1",
+                "description" => nil,
+                "priority" => nil,
+                "state" => %{"name" => "In Progress"},
+                "branchName" => nil,
+                "url" => nil,
+                "assignee" => nil,
+                "labels" => %{"nodes" => []},
+                "inverseRelations" => %{"nodes" => []},
+                "createdAt" => nil,
+                "updatedAt" => nil
+              },
+              %{
+                "id" => "id-2",
+                "identifier" => "PROJ-2",
+                "title" => "Issue 2",
+                "description" => nil,
+                "priority" => nil,
+                "state" => %{"name" => "Done"},
+                "branchName" => nil,
+                "url" => nil,
+                "assignee" => nil,
+                "labels" => %{"nodes" => []},
+                "inverseRelations" => %{"nodes" => []},
+                "createdAt" => nil,
+                "updatedAt" => nil
+              }
+            ]
+          }
+        }
+      })
+    end)
+
+    assert {:ok, issues} = Client.fetch_issue_states_by_ids(["id-1", "id-2"])
+    assert length(issues) == 2
+    assert Enum.map(issues, & &1.state) == ["In Progress", "Done"]
+
+    # Empty ID list returns empty without making a request
+    assert {:ok, []} = Client.fetch_issue_states_by_ids([])
+  end
+
+  test "linear client normalizes blockers from inverse relations via Req.Test" do
+    alias SymphonyElixir.Linear.Client
+
+    Req.Test.stub(Client, fn conn ->
+      Req.Test.json(conn, %{
+        "data" => %{
+          "issues" => %{
+            "nodes" => [
+              %{
+                "id" => "blocked-issue",
+                "identifier" => "PROJ-5",
+                "title" => "Blocked",
+                "description" => nil,
+                "priority" => nil,
+                "state" => %{"name" => "Todo"},
+                "branchName" => nil,
+                "url" => nil,
+                "assignee" => nil,
+                "labels" => %{"nodes" => []},
+                "inverseRelations" => %{
+                  "nodes" => [
+                    %{
+                      "type" => "blocks",
+                      "issue" => %{
+                        "id" => "blocker-1",
+                        "identifier" => "PROJ-3",
+                        "state" => %{"name" => "In Progress"}
+                      }
+                    },
+                    %{
+                      "type" => "relates_to",
+                      "issue" => %{
+                        "id" => "related-1",
+                        "identifier" => "PROJ-4",
+                        "state" => %{"name" => "Done"}
+                      }
+                    },
+                    %{
+                      "type" => "Blocks",
+                      "issue" => %{
+                        "id" => "blocker-2",
+                        "identifier" => "PROJ-6",
+                        "state" => %{"name" => "Todo"}
+                      }
+                    }
+                  ]
+                },
+                "createdAt" => nil,
+                "updatedAt" => nil
+              }
+            ],
+            "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+          }
+        }
+      })
+    end)
+
+    assert {:ok, [issue]} = Client.fetch_candidate_issues()
+    assert length(issue.blocked_by) == 2
+    assert Enum.map(issue.blocked_by, & &1.identifier) == ["PROJ-3", "PROJ-6"]
+  end
+
+  test "linear client graphql/3 sends operation name and validates auth via Req.Test" do
+    alias SymphonyElixir.Linear.Client
+
+    Req.Test.stub(Client, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      request = Jason.decode!(body)
+
+      assert request["operationName"] == "MyOp"
+      assert request["query"] == "query { viewer { id } }"
+      assert request["variables"] == %{"key" => "value"}
+
+      # Verify auth header was sent
+      assert Plug.Conn.get_req_header(conn, "authorization") == ["token"]
+
+      Req.Test.json(conn, %{"data" => %{"viewer" => %{"id" => "user-123"}}})
+    end)
+
+    assert {:ok, %{"data" => %{"viewer" => %{"id" => "user-123"}}}} =
+             Client.graphql("query { viewer { id } }", %{"key" => "value"}, operation_name: "MyOp")
+  end
+
+  test "linear client resolves 'me' assignee via viewer query and filters via Req.Test" do
+    alias SymphonyElixir.Linear.Client
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_assignee: "me")
+    call_count = :counters.new(1, [])
+
+    Req.Test.stub(Client, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      request = Jason.decode!(body)
+      n = :counters.add(call_count, 1, 1) || :counters.get(call_count, 1)
+
+      if request["query"] =~ "SymphonyLinearViewer" do
+        Req.Test.json(conn, %{"data" => %{"viewer" => %{"id" => "viewer-id-123"}}})
+      else
+        Req.Test.json(conn, %{
+          "data" => %{
+            "issues" => %{
+              "nodes" => [
+                %{
+                  "id" => "my-issue",
+                  "identifier" => "PROJ-ME",
+                  "title" => "My issue",
+                  "description" => nil,
+                  "priority" => nil,
+                  "state" => %{"name" => "Todo"},
+                  "branchName" => nil,
+                  "url" => nil,
+                  "assignee" => %{"id" => "viewer-id-123"},
+                  "labels" => %{"nodes" => []},
+                  "inverseRelations" => %{"nodes" => []},
+                  "createdAt" => nil,
+                  "updatedAt" => nil
+                },
+                %{
+                  "id" => "other-issue",
+                  "identifier" => "PROJ-OTHER",
+                  "title" => "Not mine",
+                  "description" => nil,
+                  "priority" => nil,
+                  "state" => %{"name" => "Todo"},
+                  "branchName" => nil,
+                  "url" => nil,
+                  "assignee" => %{"id" => "someone-else"},
+                  "labels" => %{"nodes" => []},
+                  "inverseRelations" => %{"nodes" => []},
+                  "createdAt" => nil,
+                  "updatedAt" => nil
+                }
+              ],
+              "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+            }
+          }
+        })
+      end
+    end)
+
+    assert {:ok, issues} = Client.fetch_candidate_issues()
+    assert length(issues) == 2
+    my_issue = Enum.find(issues, &(&1.identifier == "PROJ-ME"))
+    other_issue = Enum.find(issues, &(&1.identifier == "PROJ-OTHER"))
+    assert my_issue.assigned_to_worker == true
+    assert other_issue.assigned_to_worker == false
+  end
+
+  test "linear client returns error when api token is missing" do
+    alias SymphonyElixir.Linear.Client
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: "")
+    assert {:error, :missing_linear_api_token} = Client.fetch_candidate_issues()
+  end
+
+  test "linear client assignee filtering via Req.Test" do
+    alias SymphonyElixir.Linear.Client
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_assignee: "user-assigned")
+
+    Req.Test.stub(Client, fn conn ->
+      Req.Test.json(conn, %{
+        "data" => %{
+          "issues" => %{
+            "nodes" => [
+              %{
+                "id" => "assigned-issue",
+                "identifier" => "PROJ-A",
+                "title" => "Assigned",
+                "description" => nil,
+                "priority" => nil,
+                "state" => %{"name" => "Todo"},
+                "branchName" => nil,
+                "url" => nil,
+                "assignee" => %{"id" => "user-assigned"},
+                "labels" => %{"nodes" => []},
+                "inverseRelations" => %{"nodes" => []},
+                "createdAt" => nil,
+                "updatedAt" => nil
+              },
+              %{
+                "id" => "unassigned-issue",
+                "identifier" => "PROJ-B",
+                "title" => "Not mine",
+                "description" => nil,
+                "priority" => nil,
+                "state" => %{"name" => "Todo"},
+                "branchName" => nil,
+                "url" => nil,
+                "assignee" => %{"id" => "other-user"},
+                "labels" => %{"nodes" => []},
+                "inverseRelations" => %{"nodes" => []},
+                "createdAt" => nil,
+                "updatedAt" => nil
+              }
+            ],
+            "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+          }
+        }
+      })
+    end)
+
+    assert {:ok, issues} = Client.fetch_candidate_issues()
+    assert length(issues) == 2
+    assigned = Enum.find(issues, &(&1.identifier == "PROJ-A"))
+    unassigned = Enum.find(issues, &(&1.identifier == "PROJ-B"))
+    assert assigned.assigned_to_worker == true
+    assert unassigned.assigned_to_worker == false
   end
 
   defp assert_eventually(fun, attempts \\ 20)
