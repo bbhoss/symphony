@@ -6,7 +6,7 @@ defmodule SymphonyElixir.StatusDashboard do
   use GenServer
   require Logger
 
-  alias SymphonyElixir.{Config, HttpServer}
+  alias SymphonyElixir.Config
   alias SymphonyElixir.Orchestrator
 
   @minimum_idle_rerender_ms 1_000
@@ -424,15 +424,10 @@ defmodule SymphonyElixir.StatusDashboard do
   defp linear_project_url(project_slug), do: "https://linear.app/project/#{project_slug}/issues"
 
   defp dashboard_url do
-    dashboard_url(Config.server_host(), Config.server_port(), HttpServer.bound_port())
-  end
-
-  defp dashboard_url(_host, nil, _bound_port), do: nil
-
-  defp dashboard_url(host, configured_port, bound_port) do
-    port = bound_port || configured_port
+    port = Config.server_port()
 
     if is_integer(port) and port > 0 do
+      host = Config.server_host() || "127.0.0.1"
       "http://#{dashboard_url_host(host)}:#{port}/"
     else
       nil

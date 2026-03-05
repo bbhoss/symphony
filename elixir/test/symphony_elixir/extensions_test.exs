@@ -1,7 +1,6 @@
 defmodule SymphonyElixir.ExtensionsTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.HttpServer.State, as: HttpServerState
   alias SymphonyElixir.Linear.Adapter
   alias SymphonyElixir.Tracker.Memory
 
@@ -278,252 +277,9 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:error, :issue_update_failed} = Adapter.update_issue_state("issue-1", "Odd")
   end
 
-  test "http server serves html and json endpoints end-to-end" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
-    orchestrator_name = Module.concat(__MODULE__, :HttpOrchestrator)
-    server_name = Module.concat(__MODULE__, :HttpServer)
-    {:ok, orchestrator_pid} = Orchestrator.start_link(name: orchestrator_name)
+  test "state json payload building covers running, retrying, and issue payloads" do
+    alias SymphonyElixirWeb.StateJSON
 
-    {:ok, server_pid} =
-      HttpServer.start_link(
-        name: server_name,
-        host: "127.0.0.1",
-        port: 0,
-        orchestrator: orchestrator_name,
-        snapshot_timeout_ms: 1_000
-      )
-
-    on_exit(fn ->
-      if Process.alive?(server_pid), do: Process.exit(server_pid, :normal)
-      if Process.alive?(orchestrator_pid), do: Process.exit(orchestrator_pid, :normal)
-    end)
-
-    running_entry = %{
-      pid: self(),
-      ref: make_ref(),
-      identifier: "MT-HTTP",
-      issue: %Issue{id: "issue-http", identifier: "MT-HTTP", state: "In Progress"},
-      session_id: "thread-http",
-      turn_count: 7,
-      codex_app_server_pid: nil,
-      last_codex_message: "rendered",
-      last_codex_timestamp: nil,
-      last_codex_event: :notification,
-      codex_input_tokens: 4,
-      codex_output_tokens: 8,
-      codex_total_tokens: 12,
-      started_at: DateTime.utc_now()
-    }
-
-    :sys.replace_state(orchestrator_pid, fn state ->
-      %{
-        state
-        | running: %{"issue-http" => running_entry},
-          retry_attempts: %{
-            "issue-retry" => %{
-              attempt: 2,
-              due_at_ms: System.monotonic_time(:millisecond) + 2_000,
-              identifier: "MT-RETRY",
-              error: "boom"
-            }
-          }
-      }
-    end)
-
-    port = wait_for_bound_port(server_name)
-    assert HttpServer.bound_port(server_name) == port
-
-    {status, headers, body} = http_request(port, "GET", "/")
-    assert status == 200
-    assert Map.fetch!(headers, "content-type") =~ "text/html"
-    assert body =~ "Symphony Dashboard"
-
-    {status, headers, body} = http_request(port, "GET", "/api/v1/state")
-    assert status == 200
-    assert Map.fetch!(headers, "content-type") =~ "application/json"
-
-    assert %{
-             "counts" => %{"running" => 1, "retrying" => 1},
-             "running" => [%{"issue_identifier" => "MT-HTTP", "last_message" => "rendered", "turn_count" => 7}],
-             "retrying" => [%{"issue_identifier" => "MT-RETRY", "error" => "boom"}]
-           } = Jason.decode!(body)
-
-    :sys.replace_state(orchestrator_pid, fn state ->
-      update_in(state.running["issue-http"].last_codex_message, fn _ -> %{message: "structured"} end)
-    end)
-
-    {status, _headers, body} = http_request(port, "GET", "/api/v1/MT-HTTP")
-    assert status == 200
-
-    assert %{
-             "issue_identifier" => "MT-HTTP",
-             "status" => "running",
-             "running" => %{"last_message" => "structured", "turn_count" => 7},
-             "retry" => nil
-           } = Jason.decode!(body)
-
-    {status, _headers, body} = http_request(port, "GET", "/api/v1/MT-RETRY")
-    assert status == 200
-    assert %{"status" => "retrying", "retry" => %{"attempt" => 2}} = Jason.decode!(body)
-
-    {status, _headers, body} = http_request(port, "GET", "/api/v1/MT-MISSING")
-    assert status == 404
-    assert %{"error" => %{"code" => "issue_not_found"}} = Jason.decode!(body)
-
-    {status, _headers, body} = http_request(port, "POST", "/api/v1/refresh", "")
-    assert status == 202
-    assert %{"coalesced" => false, "operations" => ["poll", "reconcile"], "queued" => true} = Jason.decode!(body)
-  end
-
-  test "http server escapes html-sensitive characters in rendered dashboard payload" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
-    orchestrator_name = Module.concat(__MODULE__, :EscapingHttpOrchestrator)
-    server_name = Module.concat(__MODULE__, :EscapingHttpServer)
-    {:ok, orchestrator_pid} = Orchestrator.start_link(name: orchestrator_name)
-
-    {:ok, server_pid} =
-      HttpServer.start_link(
-        name: server_name,
-        host: "127.0.0.1",
-        port: 0,
-        orchestrator: orchestrator_name,
-        snapshot_timeout_ms: 1_000
-      )
-
-    on_exit(fn ->
-      if Process.alive?(server_pid), do: Process.exit(server_pid, :normal)
-      if Process.alive?(orchestrator_pid), do: Process.exit(orchestrator_pid, :normal)
-    end)
-
-    running_entry = %{
-      pid: self(),
-      ref: make_ref(),
-      identifier: "MT-897",
-      issue: %Issue{id: "issue-html", identifier: "MT-897", state: "In Progress"},
-      session_id: "thread-html",
-      turn_count: 7,
-      codex_app_server_pid: nil,
-      last_codex_message: "<script>window.xssed=1</script>",
-      last_codex_timestamp: nil,
-      last_codex_event: :notification,
-      codex_input_tokens: 4,
-      codex_output_tokens: 8,
-      codex_total_tokens: 12,
-      started_at: DateTime.utc_now()
-    }
-
-    :sys.replace_state(orchestrator_pid, fn state ->
-      %{state | running: %{"issue-html" => running_entry}, retry_attempts: %{}}
-    end)
-
-    port = wait_for_bound_port(server_name)
-    {status, _headers, body} = http_request(port, "GET", "/")
-    assert status == 200
-    refute String.contains?(body, "<script>window.xssed=1</script>")
-    assert body =~ "&lt;script&gt;window.xssed=1&lt;/script&gt;"
-  end
-
-  test "http server returns method, parse, timeout, and unavailable errors" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
-    server_name = Module.concat(__MODULE__, :ErrorHttpServer)
-    unavailable_orchestrator = Module.concat(__MODULE__, :UnavailableOrchestrator)
-
-    {:ok, server_pid} =
-      HttpServer.start_link(
-        name: server_name,
-        host: "127.0.0.1",
-        port: 0,
-        orchestrator: unavailable_orchestrator,
-        snapshot_timeout_ms: 5
-      )
-
-    on_exit(fn ->
-      if Process.alive?(server_pid), do: Process.exit(server_pid, :normal)
-    end)
-
-    port = wait_for_bound_port(server_name)
-
-    {status, _headers, body} = http_request(port, "POST", "/api/v1/state", "")
-    assert status == 405
-    assert %{"error" => %{"code" => "method_not_allowed"}} = Jason.decode!(body)
-
-    {status, _headers, body} = http_request(port, "GET", "/api/v1/refresh")
-    assert status == 405
-    assert %{"error" => %{"code" => "method_not_allowed"}} = Jason.decode!(body)
-
-    {status, _headers, body} = http_request(port, "POST", "/", "")
-    assert status == 405
-    assert %{"error" => %{"code" => "method_not_allowed"}} = Jason.decode!(body)
-
-    {status, _headers, body} = http_request(port, "POST", "/api/v1/MT-1", "")
-    assert status == 405
-    assert %{"error" => %{"code" => "method_not_allowed"}} = Jason.decode!(body)
-
-    {status, _headers, body} = http_request(port, "GET", "/unknown")
-    assert status == 404
-    assert %{"error" => %{"code" => "not_found"}} = Jason.decode!(body)
-
-    {status, _headers, body} = http_request(port, "GET", "/api/v1/state")
-    assert status == 200
-    assert %{"error" => %{"code" => "snapshot_unavailable"}} = Jason.decode!(body)
-
-    {status, _headers, body} = http_request(port, "POST", "/api/v1/refresh", "")
-    assert status == 503
-    assert %{"error" => %{"code" => "orchestrator_unavailable"}} = Jason.decode!(body)
-
-    assert http_raw_request(port, "BROKEN\r\n\r\n") =~ "400 Bad Request"
-
-    timeout_orchestrator = Module.concat(__MODULE__, :TimeoutOrchestrator)
-    {:ok, timeout_pid} = SlowOrchestrator.start_link(name: timeout_orchestrator)
-
-    timeout_server_name = Module.concat(__MODULE__, :TimeoutHttpServer)
-
-    {:ok, timeout_server_pid} =
-      HttpServer.start_link(
-        name: timeout_server_name,
-        host: "127.0.0.1",
-        port: 0,
-        orchestrator: timeout_orchestrator,
-        snapshot_timeout_ms: 1
-      )
-
-    on_exit(fn ->
-      if Process.alive?(timeout_server_pid), do: Process.exit(timeout_server_pid, :normal)
-      if Process.alive?(timeout_pid), do: Process.exit(timeout_pid, :normal)
-    end)
-
-    timeout_port = wait_for_bound_port(timeout_server_name)
-    {status, _headers, body} = http_request(timeout_port, "GET", "/api/v1/state")
-    assert status == 200
-    assert %{"error" => %{"code" => "snapshot_timeout"}} = Jason.decode!(body)
-  end
-
-  test "http server child spec, ignore branch, invalid host, and bound_port fallback behave as expected" do
-    spec = HttpServer.child_spec(name: :child_spec_server, port: 0)
-    assert spec.id == :child_spec_server
-    assert spec.start == {HttpServer, :start_link, [[name: :child_spec_server, port: 0]]}
-
-    Application.put_env(:symphony_elixir, :server_port_override, 0)
-
-    {:ok, default_pid} = HttpServer.start_link()
-    on_exit(fn -> if Process.alive?(default_pid), do: Process.exit(default_pid, :normal) end)
-
-    {:ok, localhost_pid} = HttpServer.start_link(name: :localhost_server, host: "localhost", port: 0)
-
-    on_exit(fn ->
-      if Process.alive?(localhost_pid), do: Process.exit(localhost_pid, :normal)
-    end)
-
-    assert :ignore = HttpServer.start_link(name: :ignored_server, port: nil)
-    assert is_integer(HttpServer.bound_port())
-    assert is_integer(wait_for_bound_port(:localhost_server))
-    assert HttpServer.bound_port(:ignored_server) == nil
-    assert {:ok, {127, 0, 0, 1}} = HttpServer.parse_host_for_test({127, 0, 0, 1})
-    assert {:ok, {0, 0, 0, 0, 0, 0, 0, 1}} = HttpServer.parse_host_for_test({0, 0, 0, 0, 0, 0, 0, 1})
-    assert {:stop, _reason} = HttpServer.init(name: :bad_host_server, host: "bad host", port: 0)
-  end
-
-  test "http server covers callback branches and synthetic snapshot payloads" do
     snapshot = %{
       running: [
         %{
@@ -531,10 +287,10 @@ defmodule SymphonyElixir.ExtensionsTest do
           identifier: "MT-BOTH",
           state: "In Progress",
           session_id: "thread-both",
-          codex_app_server_pid: nil,
-          codex_input_tokens: 0,
-          codex_output_tokens: 0,
-          codex_total_tokens: 0,
+          turn_count: 7,
+          codex_input_tokens: 4,
+          codex_output_tokens: 8,
+          codex_total_tokens: 12,
           started_at: nil,
           last_codex_timestamp: nil,
           last_codex_message: %{unexpected: true},
@@ -555,7 +311,6 @@ defmodule SymphonyElixir.ExtensionsTest do
     }
 
     orchestrator_name = Module.concat(__MODULE__, :StaticOrchestrator)
-    server_name = Module.concat(__MODULE__, :StaticHttpServer)
 
     {:ok, orchestrator_pid} =
       StaticOrchestrator.start_link(
@@ -564,247 +319,39 @@ defmodule SymphonyElixir.ExtensionsTest do
         refresh: %{queued: true, coalesced: true, requested_at: DateTime.utc_now(), operations: ["poll"]}
       )
 
-    {:ok, server_pid} =
-      HttpServer.start_link(
-        name: server_name,
-        host: "127.0.0.1",
-        port: 0,
-        orchestrator: orchestrator_name,
-        snapshot_timeout_ms: 50
-      )
-
     on_exit(fn ->
-      if Process.alive?(server_pid), do: Process.exit(server_pid, :normal)
       if Process.alive?(orchestrator_pid), do: Process.exit(orchestrator_pid, :normal)
     end)
 
-    port = wait_for_bound_port(server_name)
+    payload = StateJSON.state_payload(orchestrator_name, 5_000)
+    assert %{counts: %{running: 1, retrying: 1}} = payload
+    assert [%{issue_identifier: "MT-BOTH", turn_count: 7, last_message: nil}] = payload.running
+    assert [%{issue_identifier: "MT-BOTH", attempt: 3}] = payload.retrying
 
-    {status, _headers, body} =
-      http_request(
-        port,
-        "GET",
-        "/api/v1/state",
-        nil,
-        [{"broken-header", nil}]
-      )
+    assert {:ok, issue} = StateJSON.issue_payload("MT-BOTH", orchestrator_name, 5_000)
+    assert issue.status == "running"
+    assert issue.running.turn_count == 7
+    assert issue.running.last_message == nil
+    assert issue.retry.due_at == nil
 
-    assert status == 200
-    assert %{"counts" => %{"running" => 1, "retrying" => 1}} = Jason.decode!(body)
+    assert {:error, :issue_not_found} = StateJSON.issue_payload("MT-MISSING", orchestrator_name, 5_000)
+  end
 
-    {status, _headers, body} = http_request(port, "GET", "/api/v1/MT-BOTH")
-    assert status == 200
-    assert %{"status" => "running", "running" => %{"last_message" => nil}, "retry" => %{"due_at" => nil}} = Jason.decode!(body)
+  test "state json handles unavailable and timeout orchestrator" do
+    alias SymphonyElixirWeb.StateJSON
 
-    {status, _headers, body} =
-      http_request(
-        port,
-        "POST",
-        "/api/v1/refresh",
-        "",
-        [{"content-length", "nope"}]
-      )
+    payload = StateJSON.state_payload(:nonexistent_orchestrator, 5_000)
+    assert %{error: %{code: "snapshot_unavailable"}} = payload
 
-    assert status == 202
-    assert %{"coalesced" => true} = Jason.decode!(body)
-
-    {status, _headers, body} =
-      http_partial_request(port, "POST /api/v1/refresh HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-length: 4\r\n\r\nbo", "dy")
-
-    assert status == 202
-    assert %{"queued" => true} = Jason.decode!(body)
-
-    assert is_binary(
-             http_partial_close_request(
-               port,
-               "POST /api/v1/refresh HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-length: 4\r\n\r\nbo"
-             )
-           )
-
-    oversized_header_response =
-      http_raw_request(
-        port,
-        "GET /api/v1/state HTTP/1.1\r\nhost: 127.0.0.1\r\nx-overflow: #{String.duplicate("a", 9_000)}\r\n\r\n"
-      )
-
-    assert oversized_header_response =~ "413 Payload Too Large"
-    assert oversized_header_response =~ "\"headers_too_large\""
-
-    oversized_body_response =
-      http_raw_request(
-        port,
-        "POST /api/v1/refresh HTTP/1.1\r\nhost: 127.0.0.1\r\ncontent-length: 1048577\r\n\r\n"
-      )
-
-    assert oversized_body_response =~ "413 Payload Too Large"
-    assert oversized_body_response =~ "\"body_too_large\""
-
-    assert http_partial_close_request(
-             port,
-             "GET /api/v1/state HTTP/1.1\r\nhost: 127.0.0.1"
-           ) == ""
-
-    assert {:error, :bad_request} = HttpServer.parse_raw_request_for_test("GET /api/v1/state HTTP/1.1")
-    assert {:error, :bad_request} = HttpServer.parse_raw_request_for_test("\r\n\r\n")
-
-    unexpected_orchestrator = Module.concat(__MODULE__, :UnexpectedOrchestrator)
-    unexpected_server = Module.concat(__MODULE__, :UnexpectedHttpServer)
-
-    {:ok, unexpected_orchestrator_pid} =
-      StaticOrchestrator.start_link(name: unexpected_orchestrator, snapshot: :unexpected)
-
-    {:ok, unexpected_server_pid} =
-      HttpServer.start_link(
-        name: unexpected_server,
-        host: "127.0.0.1",
-        port: 0,
-        orchestrator: unexpected_orchestrator,
-        snapshot_timeout_ms: 50
-      )
+    timeout_orchestrator = Module.concat(__MODULE__, :TimeoutOrchestrator)
+    {:ok, timeout_pid} = SlowOrchestrator.start_link(name: timeout_orchestrator)
 
     on_exit(fn ->
-      if Process.alive?(unexpected_server_pid), do: Process.exit(unexpected_server_pid, :normal)
-      if Process.alive?(unexpected_orchestrator_pid), do: Process.exit(unexpected_orchestrator_pid, :normal)
+      if Process.alive?(timeout_pid), do: Process.exit(timeout_pid, :normal)
     end)
 
-    unexpected_port = wait_for_bound_port(unexpected_server)
-    {status, _headers, body} = http_request(unexpected_port, "GET", "/api/v1/MT-BOTH")
-    assert status == 404
-    assert %{"error" => %{"code" => "issue_not_found"}} = Jason.decode!(body)
-
-    {:ok, closed_socket} = :gen_tcp.listen(0, [:binary, {:active, false}])
-    :gen_tcp.close(closed_socket)
-
-    closed_state = %HttpServerState{
-      listen_socket: closed_socket,
-      port: 0,
-      orchestrator: orchestrator_name,
-      snapshot_timeout_ms: 1
-    }
-
-    assert {:stop, :normal, ^closed_state} = HttpServer.handle_info(:accept, closed_state)
-
-    {:ok, listen_socket} = :gen_tcp.listen(0, [:binary, {:active, false}, {:reuseaddr, true}])
-    {:ok, listen_port} = :inet.port(listen_socket)
-    acceptor = spawn(fn -> {:ok, _socket} = :gen_tcp.accept(listen_socket) end)
-    {:ok, client_socket} = :gen_tcp.connect(~c"127.0.0.1", listen_port, [:binary, {:active, false}], 1_000)
-
-    invalid_state = %HttpServerState{
-      listen_socket: client_socket,
-      port: 0,
-      orchestrator: orchestrator_name,
-      snapshot_timeout_ms: 1
-    }
-
-    assert {:stop, :einval, ^invalid_state} = HttpServer.handle_info(:accept, invalid_state)
-    :gen_tcp.close(client_socket)
-    :gen_tcp.close(listen_socket)
-    Process.exit(acceptor, :kill)
-
-    {:ok, terminate_socket} = :gen_tcp.listen(0, [:binary, {:active, false}])
-
-    assert :ok =
-             HttpServer.terminate(
-               :normal,
-               %HttpServerState{
-                 listen_socket: terminate_socket,
-                 port: 0,
-                 orchestrator: orchestrator_name,
-                 snapshot_timeout_ms: 1
-               }
-             )
-
-    assert :ok = HttpServer.terminate(:normal, :not_a_state)
-  end
-
-  defp wait_for_bound_port(server_name) do
-    assert_eventually(fn ->
-      is_integer(HttpServer.bound_port(server_name))
-    end)
-
-    HttpServer.bound_port(server_name)
-  end
-
-  defp http_request(port, method, path, body \\ nil, extra_headers \\ []) do
-    request = build_http_request(method, path, body, extra_headers)
-
-    response = http_raw_request(port, request)
-    [header_block, response_body] = String.split(response, "\r\n\r\n", parts: 2)
-    [status_line | header_lines] = String.split(header_block, "\r\n")
-    [_, status_code, _reason] = String.split(status_line, " ", parts: 3)
-
-    headers =
-      Enum.reduce(header_lines, %{}, fn line, acc ->
-        case String.split(line, ":", parts: 2) do
-          [name, value] -> Map.put(acc, String.downcase(name), String.trim(value))
-          _ -> acc
-        end
-      end)
-
-    {String.to_integer(status_code), headers, response_body}
-  end
-
-  defp http_raw_request(port, request) do
-    {:ok, socket} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false], 1_000)
-    :ok = :gen_tcp.send(socket, request)
-    response = recv_all(socket, "")
-    :gen_tcp.close(socket)
-    response
-  end
-
-  defp http_partial_request(port, head, tail) do
-    {:ok, socket} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false], 1_000)
-    :ok = :gen_tcp.send(socket, head)
-    Process.sleep(10)
-    :ok = :gen_tcp.send(socket, tail)
-    response = recv_all(socket, "")
-    :gen_tcp.close(socket)
-    [header_block, body] = String.split(response, "\r\n\r\n", parts: 2)
-    [status_line | _] = String.split(header_block, "\r\n")
-    [_, status_code, _reason] = String.split(status_line, " ", parts: 3)
-    {String.to_integer(status_code), %{}, body}
-  end
-
-  defp http_partial_close_request(port, request) do
-    {:ok, socket} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false], 1_000)
-    :ok = :gen_tcp.send(socket, request)
-    :ok = :gen_tcp.shutdown(socket, :write)
-    response = recv_all(socket, "")
-    :gen_tcp.close(socket)
-    response
-  end
-
-  defp build_http_request(method, path, body, extra_headers) do
-    headers =
-      [
-        {"host", "127.0.0.1"},
-        {"connection", "close"}
-      ] ++ extra_headers
-
-    headers =
-      if is_binary(body) and not Enum.any?(headers, fn {name, _value} -> name == "content-length" end) do
-        headers ++ [{"content-length", Integer.to_string(byte_size(body))}]
-      else
-        headers
-      end
-
-    [
-      "#{method} #{path} HTTP/1.1\r\n",
-      Enum.map(headers, fn
-        {name, nil} -> "#{name}\r\n"
-        {name, value} -> "#{name}: #{value}\r\n"
-      end),
-      "\r\n",
-      body || ""
-    ]
-    |> IO.iodata_to_binary()
-  end
-
-  defp recv_all(socket, acc) do
-    case :gen_tcp.recv(socket, 0, 1_000) do
-      {:ok, chunk} -> recv_all(socket, acc <> chunk)
-      {:error, :closed} -> acc
-    end
+    timeout_payload = StateJSON.state_payload(timeout_orchestrator, 1)
+    assert %{error: %{code: "snapshot_timeout"}} = timeout_payload
   end
 
   defp assert_eventually(fun, attempts \\ 20)
